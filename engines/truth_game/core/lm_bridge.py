@@ -33,8 +33,46 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-#: 门面模块名；调用时惰性 import（不在 import 期缓存模块或函数对象）。
-_LM_FACADE_MODULES = ("astrbot_plugin_dynamics_memory.api.public", "astrbot_plugin_livingmemory.api.public")
+try:
+    from ....bridges.memory_bridge import (
+        FACADE_MODULES as _LM_FACADE_MODULES,
+        MEMORY_ALIASES as _SHARED_LM_ALIASES,
+        _star_is_usable,
+        _star_meta,
+    )
+except Exception:  # pragma: no cover - standalone truth_game import fallback
+    _LM_FACADE_MODULES = (
+        "astrbot_plugin_dynamics_memory.api.public",
+        "astrbot_plugin_livingmemory.api.public",
+    )
+    _SHARED_LM_ALIASES = (
+        "astrbot_plugin_dynamics_memory",
+        "DynamicsMemory",
+        "群间记忆",
+        "LivingMemory",
+        "astrbot_plugin_livingmemory",
+    )
+
+    def _star_is_usable(star: Any) -> bool:
+        if star is None or getattr(star, "activated", True) is False:
+            return False
+        owner = getattr(star, "star_cls", None)
+        return (
+            owner is not None
+            and not getattr(owner, "_terminating", False)
+            and not getattr(owner, "_closed", False)
+        )
+
+    def _star_meta(star: Any) -> set[str]:
+        names: set[str] = set()
+        for field in ("name", "display_name", "root_dir_name", "module_path"):
+            value = getattr(star, field, None)
+            if value is not None:
+                text = str(value).strip().lower()
+                if text:
+                    names.add(text)
+        return names
+
 _LM_FACADE_MODULE = _LM_FACADE_MODULES[0]
 
 #: 门面 ALIASES 是常量契约（运行期不会变），import 期取一次即可。
@@ -70,21 +108,14 @@ _lm_get_active = _lm_public_get_active_plugin or _lm_legacy_get_active
 #: Plugin identities checked against ``context.get_registered_star`` and
 #: against star metadata fields (name / display_name / root_dir_name /
 #: module_path), case-insensitively. 门面可用时以门面的 ALIASES 为唯一真源。
-_LM_ALIASES: tuple[str, ...] = ("astrbot_plugin_dynamics_memory", "DynamicsMemory", "群间记忆", "LivingMemory", "astrbot_plugin_livingmemory")
+_LM_ALIASES: tuple[str, ...] = tuple(_SHARED_LM_ALIASES)
 
 if _LM_PUBLIC_ALIASES:
     _LM_ALIASES = tuple(_LM_PUBLIC_ALIASES)
 
 
 def _facade_fn(name: str):
-    """返回当前门面模块上的可调用对象；门面不可用时 None。
-
-    B6：必须**每次调用时重新 import**，不能缓存 import 期绑定的函数对象 ——
-    ``ensure_current`` 在源码指纹变化时会把 ``astrbot_plugin_livingmemory.*``
-    从 ``sys.modules`` 摘除并 delattr，旧函数对象会一直引用旧模块（连旧的
-    weakref 全局一起变陈旧）。``importlib.import_module`` 命中 ``sys.modules`` 时
-    只是一次字典查找，开销可忽略。
-    """
+    """返回当前门面模块上的可调用对象；门面不可用时 None。"""
     for mod_name in _LM_FACADE_MODULES:
         try:
             module = importlib.import_module(mod_name)
@@ -102,33 +133,12 @@ def _facade_find_plugin(context: Any) -> Any | None:
     if fn is None:
         return None
     try:
-        return fn(context)
+        inst = fn(context)
+        if inst is not None and (getattr(inst, "_terminating", False) or getattr(inst, "_closed", False)):
+            return None
+        return inst
     except Exception:
         return None
-
-
-def _star_is_usable(star: Any) -> bool:
-    """A registered-star entry is usable when it was not explicitly
-    deactivated and it carries a plugin instance (``star_cls``)."""
-    if star is None:
-        return False
-    if getattr(star, "activated", True) is False:
-        return False
-    return getattr(star, "star_cls", None) is not None
-
-
-def _star_meta(star: Any) -> set[str]:
-    """Lower-cased, stripped set of every non-empty identity field the star
-    exposes. Unknown fields simply don't contribute."""
-    names: set[str] = set()
-    for field in ("name", "display_name", "root_dir_name", "module_path"):
-        value = getattr(star, field, None)
-        if value is None:
-            continue
-        text = str(value).strip().lower()
-        if text:
-            names.add(text)
-    return names
 
 
 def detect_lm(context: Any) -> Any | None:

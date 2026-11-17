@@ -181,6 +181,12 @@ class AvatarBlock(ContentBlock):
         size = self._spec.avatar_size
         try:
             with PILImage.open(self._image_path) as source:
+                if source.mode in ("RGBA", "LA", "PA") or (
+                    source.mode == "P" and "transparency" in source.info
+                ):
+                    source = source.convert("RGBA")
+                elif source.mode == "P":
+                    source = source.convert("RGB")
                 source.thumbnail((size, size))
                 if source.size == (size, size):
                     return source.copy()

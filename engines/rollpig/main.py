@@ -6,8 +6,8 @@ import logging
 import re
 from pathlib import Path
 
-from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star, StarTools
+from astrbot.api.event import AstrMessageEvent
+from astrbot.api.star import Context, StarTools
 from astrbot.core import AstrBotConfig
 
 from .rollpig.adapter import AtTargetResolver, PigPresenter

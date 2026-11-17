@@ -13,7 +13,7 @@ ensure_current(
         ("core.coordinator", "ActivityCoordinator", "sync_outcome_records"),
         ("core.store", "ActivityStore", "save_completion"),
     ],
-    version="0.1.0",
+    version="0.1.1-rc.1",
 )
 
 import asyncio
@@ -34,6 +34,7 @@ from .core.commands import (
     build_help_text,
     handle_cancel_command,
     handle_category_shortcut,
+    handle_cleanup_command,
     handle_complete_command,
     handle_create_command,
     handle_detail_command,
@@ -59,17 +60,6 @@ from .engines.truth_game.main import TruthGamePlugin as TruthGameEngine
 from .engines.what_to_eat.main import WhatToEatPlugin as WhatToEatEngine
 from .runtime import LEGACY_PLUGIN_IDS, PLUGIN_ID, ConfigSection, EngineContext
 
-# Guard against active legacy plugins before import-time tool registration collides.
-for _existing in star_registry:
-    if (
-        getattr(_existing, "name", None) in LEGACY_PLUGIN_IDS
-        and getattr(_existing, "activated", False)
-        and getattr(_existing, "star_cls", None) is not None
-    ):
-        raise RuntimeError(
-            f"请先停用已接管的旧娱乐插件 {_existing.name}，再加载群间游戏 ({PLUGIN_ID})"
-        )
-
 MODULE_FLAG_MAP: dict[str, str] = {
     item["key"]: item["config_flag"] for item in ENGINE_CATALOG
 }
@@ -81,20 +71,13 @@ MODULE_LABEL_MAP: dict[str, str] = {
 class DynamicsGamesPlugin(Star):
     """群间游戏：组织共读、游戏约局、接龙创作、小型挑战、共同制作作品与群聊娱乐引擎总成。"""
 
-    VERSION = "0.1.0"
+    VERSION = "0.1.1-rc.1"
     name = PLUGIN_ID
     author = "ysyhlly"
     plugin_id = f"ysyhlly/{PLUGIN_ID}"
 
     def __init__(self, context: Context, config: AstrBotConfig | dict | None = None):
         super().__init__(context)
-        for pid in LEGACY_PLUGIN_IDS:
-            existing = context.get_registered_star(pid)
-            if existing is not None and getattr(existing, "activated", False):
-                raise RuntimeError(
-                    f"请先停用旧插件 {pid}，再启用群间游戏 ({PLUGIN_ID})"
-                )
-
         self.raw_config = config if config is not None else {}
         self._config_lock = threading.RLock()
         self.engine_context = EngineContext(self)
@@ -104,6 +87,7 @@ class DynamicsGamesPlugin(Star):
         self.engines: dict[str, Any] = {}
         self._truth_outcome_task: asyncio.Task | None = None
         self._sections: dict[str, ConfigSection] = {}
+        self._legacy_conflicts: list[str] = []
         self._ready = False
         self._closed = False
 
@@ -145,7 +129,35 @@ class DynamicsGamesPlugin(Star):
     def module_states(self) -> dict[str, bool]:
         return {k: self.module_enabled(k) for k in MODULE_FLAG_MAP}
 
+    def _detect_legacy_conflicts(self) -> list[str]:
+        found: list[str] = []
+        getter = getattr(self.context, "get_registered_star", None)
+        for pid in sorted(LEGACY_PLUGIN_IDS):
+            if callable(getter):
+                existing = getter(pid)
+                if existing is not None and getattr(existing, "activated", False):
+                    found.append(pid)
+                    continue
+            for existing in star_registry:
+                if (
+                    getattr(existing, "name", None) == pid
+                    and getattr(existing, "activated", False)
+                    and getattr(existing, "star_cls", None) is not None
+                ):
+                    found.append(pid)
+                    break
+        return found
+
     async def initialize(self) -> None:
+        conflicts = self._detect_legacy_conflicts()
+        if conflicts:
+            self._legacy_conflicts = conflicts
+            self._ready = False
+            logger.warning(
+                "[DynamicsGames] 检测到已启用的旧插件 (%s)，已进入降级待机模式；停用旧插件后重载即可恢复。",
+                ", ".join(conflicts),
+            )
+            return
         try:
             reload(series_panels).register_series_panels(self, PLUGIN_ID)
             db_path = StarTools.get_data_dir(PLUGIN_ID) / "dynamics_games.db"
@@ -211,6 +223,8 @@ class DynamicsGamesPlugin(Star):
                     except Exception:
                         logger.exception("[DynamicsGames] 引擎 %s 关闭异常", key)
             self.engines.clear()
+            if self.store is not None:
+                await asyncio.to_thread(self.store.close)
         finally:
             self.engine_context.release()
 
@@ -391,6 +405,17 @@ class DynamicsGamesPlugin(Star):
         raw = self._extract_tail(event, ("取消", "流局", "cancel", "abort"), args)
         yield event.plain_result(
             await handle_cancel_command(self.coordinator, event, raw)
+        )
+
+    @activity_group.command("清理", alias={"cleanup", "prune"})
+    async def act_cleanup(self, event: AstrMessageEvent, args: str = ""):
+        """群管理员手动清理超时滞留活动"""
+        if self.coordinator is None:
+            yield event.plain_result("群间游戏尚未就绪。")
+            return
+        raw = self._extract_tail(event, ("清理", "cleanup", "prune"), args)
+        yield event.plain_result(
+            await handle_cleanup_command(self.coordinator, event, raw)
         )
 
     @activity_group.command("成果", alias={"导出", "outcome", "result", "export", "查看成果"})

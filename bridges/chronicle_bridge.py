@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -9,6 +10,8 @@ from typing import Any
 from ..core.models import CATEGORIES, RISK_WORDS, activity_fingerprint
 
 logger = logging.getLogger("astrbot.plugin.astrbot_plugin_dynamics_games.chronicle_bridge")
+
+DEFAULT_BRIDGE_TIMEOUT = 15.0
 
 CHRONICLE_ALIASES: tuple[str, ...] = (
     "astrbot_plugin_group_chronicle",
@@ -26,6 +29,7 @@ def find_chronicle_plugin(context: Any) -> Any | None:
     getter = getattr(context, "get_all_stars", None)
     if not callable(getter):
         return None
+    wanted = {alias.lower() for alias in CHRONICLE_ALIASES}
     try:
         raw = getter()
         entries = list(raw.items()) if isinstance(raw, dict) else [("", r) for r in (raw or ())]
@@ -33,7 +37,7 @@ def find_chronicle_plugin(context: Any) -> Any | None:
             if _value(row, "activated", True) is False:
                 continue
             names = {
-                str(x)
+                str(x).strip().lower()
                 for x in (
                     key,
                     _value(row, "name"),
@@ -42,14 +46,14 @@ def find_chronicle_plugin(context: Any) -> Any | None:
                 )
                 if x
             }
-            if names & set(CHRONICLE_ALIASES):
+            if names & wanted:
                 owner = (
                     _value(row, "star_cls")
                     or _value(row, "star")
                     or _value(row, "plugin")
                 )
                 if owner is not None and not isinstance(owner, type):
-                    if not getattr(owner, "_terminating", False):
+                    if not getattr(owner, "_terminating", False) and not getattr(owner, "_closed", False):
                         return owner
     except Exception:
         return None
@@ -61,10 +65,23 @@ def chronicle_status(context: Any) -> dict[str, Any]:
     if plugin is None:
         return {"detected": False, "ready": False, "detail": "not_installed_or_disabled"}
     has_api = callable(getattr(plugin, "record_valuable_outcome", None))
+    caps_fn = getattr(plugin, "get_dynamics_capabilities", None)
+    if callable(caps_fn):
+        try:
+            caps = caps_fn()
+            if isinstance(caps, dict):
+                return {
+                    "detected": True,
+                    "ready": bool(caps.get("ready")),
+                    "provider_id": caps.get("provider_id", "astrbot_plugin_group_chronicle"),
+                    "has_outcome_api": has_api,
+                }
+        except Exception:
+            pass
     has_history = getattr(plugin, "history", None) is not None
     return {
         "detected": True,
-        "ready": bool(has_history),
+        "ready": bool(has_history and has_api),
         "has_outcome_api": has_api,
     }
 
@@ -80,6 +97,7 @@ async def sync_outcome_to_chronicle(
     valuable: bool,
     importance: int = 1,
     admission_mode: str = "auto",
+    timeout: float = DEFAULT_BRIDGE_TIMEOUT,
 ) -> dict[str, Any]:
     """Submit a verified, completed, valuable outcome to Group Chronicle.
 
@@ -180,7 +198,7 @@ async def sync_outcome_to_chronicle(
     record_fn = getattr(plugin, "record_valuable_outcome", None)
     if callable(record_fn):
         try:
-            res = await record_fn(umo, outcome_payload)
+            res = await asyncio.wait_for(record_fn(umo, outcome_payload), timeout=timeout)
             if isinstance(res, dict) and res.get("admitted"):
                 return {
                     "ok": True,
@@ -193,6 +211,14 @@ async def sync_outcome_to_chronicle(
                 "status": str((res or {}).get("status") or "rejected"),
                 "event_id": 0,
                 "reason": str((res or {}).get("reason") or "未通过群史记准入检查"),
+            }
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning("群史记 record_valuable_outcome 调用超时 (%.1fs)", timeout)
+            return {
+                "ok": False,
+                "status": "timeout",
+                "event_id": 0,
+                "reason": "群史记收录超时",
             }
         except Exception as exc:
             logger.warning("群史记 record_valuable_outcome 调用失败: %s", exc)

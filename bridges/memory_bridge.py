@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import logging
 import time
 from typing import Any
 
 logger = logging.getLogger("astrbot.plugin.astrbot_plugin_dynamics_games.memory_bridge")
+
+DEFAULT_BRIDGE_TIMEOUT = 15.0
 
 FACADE_MODULES: tuple[str, ...] = (
     "astrbot_plugin_dynamics_memory.api.public",
@@ -26,6 +29,24 @@ def _value(row: Any, key: str, default: Any = None) -> Any:
     return row.get(key, default) if isinstance(row, dict) else getattr(row, key, default)
 
 
+def _star_is_usable(star: Any) -> bool:
+    if star is None or _value(star, "activated", True) is False:
+        return False
+    owner = _value(star, "star_cls") or _value(star, "star") or _value(star, "plugin")
+    if owner is None or isinstance(owner, type):
+        return False
+    return not getattr(owner, "_terminating", False) and not getattr(owner, "_closed", False)
+
+
+def _star_meta(star: Any) -> set[str]:
+    names: set[str] = set()
+    for field in ("name", "display_name", "root_dir_name", "module_path"):
+        val = _value(star, field)
+        if val:
+            names.add(str(val).strip().lower())
+    return names
+
+
 def find_memory_plugin(context: Any) -> Any | None:
     """Resolve active Dynamics Memory plugin instance without raising."""
     for mod_name in FACADE_MODULES:
@@ -34,7 +55,11 @@ def find_memory_plugin(context: Any) -> Any | None:
             fn = getattr(mod, "find_plugin", None)
             if callable(fn):
                 inst = fn(context)
-                if inst is not None and not getattr(inst, "_terminating", False):
+                if (
+                    inst is not None
+                    and not getattr(inst, "_terminating", False)
+                    and not getattr(inst, "_closed", False)
+                ):
                     return inst
         except Exception:
             continue
@@ -42,23 +67,17 @@ def find_memory_plugin(context: Any) -> Any | None:
     getter = getattr(context, "get_all_stars", None)
     if not callable(getter):
         return None
+    wanted = {alias.lower() for alias in MEMORY_ALIASES}
     try:
         raw = getter()
         entries = list(raw.items()) if isinstance(raw, dict) else [("", r) for r in (raw or ())]
         for key, row in entries:
-            if _value(row, "activated", True) is False:
+            if not _star_is_usable(row):
                 continue
-            names = {
-                str(x)
-                for x in (
-                    key,
-                    _value(row, "name"),
-                    _value(row, "root_dir_name"),
-                    _value(row, "display_name"),
-                )
-                if x
-            }
-            if names & set(MEMORY_ALIASES):
+            names = _star_meta(row)
+            if key:
+                names.add(str(key).strip().lower())
+            if names & wanted:
                 owner = (
                     _value(row, "star_cls")
                     or _value(row, "star")
@@ -90,8 +109,16 @@ def memory_status(context: Any) -> dict[str, Any]:
                 }
         except Exception:
             pass
-    ready = bool(getattr(getattr(plugin, "initializer", None), "is_initialized", False))
-    return {"detected": True, "ready": ready, "has_activity_api": False}
+    init = getattr(plugin, "initializer", None)
+    ready = bool(
+        getattr(init, "is_initialized", False)
+        and getattr(init, "memory_engine", None) is not None
+    )
+    return {
+        "detected": True,
+        "ready": ready,
+        "has_activity_api": callable(getattr(plugin, "record_activity_experience", None)),
+    }
 
 
 async def sync_experience_to_memory(
@@ -107,6 +134,7 @@ async def sync_experience_to_memory(
     participants: list[dict[str, Any]],
     source_refs: list[dict[str, Any]] | None = None,
     occurred_at: float | None = None,
+    timeout: float = DEFAULT_BRIDGE_TIMEOUT,
 ) -> dict[str, Any]:
     """Write a group activity through Dynamics Memory's source-validating API."""
     plugin = find_memory_plugin(context)
@@ -147,7 +175,7 @@ async def sync_experience_to_memory(
             "reason": "群间记忆版本未开放带来源校验的经历接口",
         }
     try:
-        res = await record_fn(payload)
+        res = await asyncio.wait_for(record_fn(payload), timeout=timeout)
         response = res if isinstance(res, dict) else {}
         doc_id = int(response.get("doc_id") or 0)
         reason = str(response.get("reason") or "")
@@ -160,6 +188,9 @@ async def sync_experience_to_memory(
             "ok": False, "status": reason or "rejected", "doc_id": 0,
             "reason": reason or "记忆写入未通过校验",
         }
+    except (asyncio.TimeoutError, TimeoutError):
+        logger.warning("群间记忆 record_activity_experience 调用超时 (%.1fs)", timeout)
+        return {"ok": False, "status": "timeout", "doc_id": 0, "reason": "群间记忆写入超时"}
     except Exception as exc:
         logger.warning("群间记忆 record_activity_experience 调用异常: %s", exc)
         return {"ok": False, "status": "error", "doc_id": 0, "reason": str(exc)[:200]}

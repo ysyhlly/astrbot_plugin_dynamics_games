@@ -308,6 +308,21 @@ class TasteMemoryStore:
             self._profiles = {}
 
     def _save(self) -> None:
+        self._save_timer: threading.Timer | None
+        timer = getattr(self, "_save_timer", None)
+        if timer is not None:
+            timer.cancel()
+            self._save_timer = None
+        if getattr(self, "_defer_save", True):
+            self._dirty = True
+            new_timer = threading.Timer(0.25, self.flush)
+            new_timer.daemon = True
+            self._save_timer = new_timer
+            new_timer.start()
+            return
+        self._write_snapshot()
+
+    def _write_snapshot(self) -> None:
         payload = {
             "version": 1,
             "updated_at": _now_ts(),
@@ -316,10 +331,11 @@ class TasteMemoryStore:
         tmp = self._path.with_suffix(".json.tmp")
         try:
             tmp.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                 encoding="utf-8",
             )
             tmp.replace(self._path)
+            self._dirty = False
         except Exception as e:
             logger.warning("保存口味记忆失败: %s", e)
             try:
@@ -327,6 +343,15 @@ class TasteMemoryStore:
                     tmp.unlink()
             except Exception:
                 pass
+
+    def flush(self) -> None:
+        with self._lock:
+            timer = getattr(self, "_save_timer", None)
+            if timer is not None:
+                timer.cancel()
+                self._save_timer = None
+            if getattr(self, "_dirty", False):
+                self._write_snapshot()
 
     def get_profile(self, user_id: str) -> UserTasteProfile:
         uid = str(user_id or "").strip() or "unknown"

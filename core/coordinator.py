@@ -55,6 +55,20 @@ class ActivityCoordinator:
     def min_chronicle_contributions(self) -> int:
         return max(1, int(self._act_cfg().get("min_chronicle_contributions", 2)))
 
+    def stale_expire_seconds(self) -> float:
+        hours = float(self._act_cfg().get("stale_expire_hours", 168) or 0)
+        return max(0.0, hours * 3600.0)
+
+    async def cleanup_stale_activities(
+        self, *, umo: str = "", max_age_seconds: float | None = None
+    ) -> list[dict[str, Any]]:
+        age = self.stale_expire_seconds() if max_age_seconds is None else float(max_age_seconds)
+        if age <= 0:
+            return []
+        return await asyncio.to_thread(
+            self.store.expire_stale_activities, max_age_seconds=age, umo=umo
+        )
+
     async def enqueue_truth_outcome(self, snapshot: dict[str, Any]) -> None:
         await asyncio.to_thread(self.store.enqueue_truth_room, snapshot)
         self.truth_outcome_ready.set()
@@ -66,21 +80,27 @@ class ActivityCoordinator:
             except Exception:
                 logger.exception("Could not materialize truth room %s", room_id)
         due = await asyncio.to_thread(
-            self.store.pending_truth_outcomes,
-            memory=self.memory_sync_enabled(), chronicle=self.chronicle_sync_enabled(),
+            self.store.pending_outcome_syncs,
+            memory=self.memory_sync_enabled(),
+            chronicle=self.chronicle_sync_enabled(),
         )
         for activity_id in due:
             try:
                 await self.sync_outcome_records(activity_id)
             except Exception:
-                logger.exception("Could not sync truth outcome %s", activity_id)
+                logger.exception("Could not sync pending outcome %s", activity_id)
 
     async def run_truth_outcomes(self, room_manager) -> None:
+        last_stale_check = 0.0
         while True:
             self.truth_outcome_ready.clear()
             try:
                 await room_manager.flush_outcomes()
                 await self.flush_truth_outcomes()
+                mono = time.monotonic()
+                if mono - last_stale_check >= 1800.0:
+                    await self.cleanup_stale_activities()
+                    last_stale_check = mono
             except Exception:
                 logger.exception("Could not read pending truth outcomes")
             try:
@@ -114,18 +134,9 @@ class ActivityCoordinator:
         if not clean_title:
             return False, "请填写活动标题，例如：`/活动 发起 共读 银河铁道之夜`", None
 
-        open_list = await asyncio.to_thread(
-            self.store.list_activities, umo=umo, status="open", limit=50
-        )
-        if len(open_list) >= self.max_active_per_group():
-            return (
-                False,
-                f"本群已有 {len(open_list)} 个进行中的活动（上限 {self.max_active_per_group()} 个），请先完结或取消旧活动。",
-                None,
-            )
-
-        act = await asyncio.to_thread(
-            self.store.create_activity,
+        await self.cleanup_stale_activities(umo=umo)
+        return await asyncio.to_thread(
+            self.store.create_activity_checked,
             umo=umo,
             group_id=group_id,
             category=category,
@@ -137,8 +148,8 @@ class ActivityCoordinator:
             target_count=target_count,
             min_participants=min_participants,
             max_participants=max_participants,
+            max_active_per_group=self.max_active_per_group(),
         )
-        return True, "创建成功", act
 
     async def join(
         self,
@@ -362,6 +373,21 @@ class ActivityCoordinator:
             self.store.get_contributions, activity_id, 200
         )
         notes: list[str] = []
+        retryable_mem_statuses = {
+            "pending",
+            "unavailable",
+            "error",
+            "timeout",
+            "not_initialized",
+            "engine_unavailable",
+            "source_store_unavailable",
+            "memory_index_unavailable",
+            "memory_write_failed",
+            "source_snapshot_changed",
+        }
+        retryable_chr_statuses = {"pending", "unavailable", "error", "timeout"}
+        retryable_failure = False
+        sync_errors: list[str] = []
 
         # 1. Sync experience to Dynamics Memory (记忆负责保存经历)
         if self.memory_sync_enabled() and outcome["memory_status"] in {
@@ -401,6 +427,9 @@ class ActivityCoordinator:
                 notes.append("经历已保存至「群间记忆」")
             else:
                 notes.append(f"群间记忆未写入（{mem_res['reason']}）")
+                if mem_res["status"] in retryable_mem_statuses:
+                    retryable_failure = True
+                    sync_errors.append(f"memory:{mem_res['status']}")
 
         # 2. Sync valuable outcome to Group Chronicle (群史记负责收录有价值的结果)
         if self.chronicle_sync_enabled() and outcome["chronicle_event_id"]:
@@ -438,8 +467,18 @@ class ActivityCoordinator:
                 notes.append(state_txt)
             else:
                 notes.append(f"群史记未收录（{chr_res['reason']}）")
+                if chr_res["status"] in retryable_chr_statuses:
+                    retryable_failure = True
+                    sync_errors.append(f"chronicle:{chr_res['status']}")
         elif not outcome["valuable"]:
             notes.append(outcome["worthiness_reason"])
+
+        await asyncio.to_thread(
+            self.store.record_sync_attempt,
+            act["id"],
+            succeeded=not retryable_failure,
+            error="; ".join(sync_errors),
+        )
 
         return "；".join(notes)
 

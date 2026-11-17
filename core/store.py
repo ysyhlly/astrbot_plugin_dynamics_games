@@ -37,6 +37,10 @@ class ActivityStore:
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = self._locks.setdefault(str(self.path.resolve()), threading.RLock())
+        self._conn: sqlite3.Connection | None = None
+        self._tx_depth = 0
+        with self.connection(write=False) as db:
+            db.execute("PRAGMA journal_mode=WAL")
         with self.connection(write=True) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version not in (0, 1):
@@ -119,6 +123,9 @@ class ActivityStore:
                     memory_doc_id INTEGER NOT NULL DEFAULT 0,
                     chronicle_status TEXT NOT NULL DEFAULT 'skipped',
                     chronicle_event_id INTEGER NOT NULL DEFAULT 0,
+                    sync_attempts INTEGER NOT NULL DEFAULT 0,
+                    next_sync_at REAL NOT NULL DEFAULT 0,
+                    last_sync_error TEXT NOT NULL DEFAULT '',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
@@ -136,27 +143,71 @@ class ActivityStore:
                 PRAGMA user_version = 1;
                 """
             )
+            cols = {
+                str(r["name"])
+                for r in db.execute("PRAGMA table_info(outcomes)").fetchall()
+            }
+            if "sync_attempts" not in cols:
+                db.execute(
+                    "ALTER TABLE outcomes ADD COLUMN sync_attempts INTEGER NOT NULL DEFAULT 0"
+                )
+            if "next_sync_at" not in cols:
+                db.execute(
+                    "ALTER TABLE outcomes ADD COLUMN next_sync_at REAL NOT NULL DEFAULT 0"
+                )
+            if "last_sync_error" not in cols:
+                db.execute(
+                    "ALTER TABLE outcomes ADD COLUMN last_sync_error TEXT NOT NULL DEFAULT ''"
+                )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_outcomes_sync ON outcomes(next_sync_at, memory_status, chronicle_status)"
+            )
+
+    def _ensure_conn(self) -> sqlite3.Connection:
+        if self._conn is None:
+            conn = sqlite3.connect(
+                str(self.path), timeout=30.0, check_same_thread=False
+            )
+            conn.row_factory = sqlite3.Row
+            conn.isolation_level = None
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn = conn
+        return self._conn
 
     @contextmanager
     def connection(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
         with self._lock:
-            conn = sqlite3.connect(str(self.path), timeout=30.0)
-            conn.row_factory = sqlite3.Row
+            conn = self._ensure_conn()
+            started_tx = False
+            if write and self._tx_depth == 0:
+                conn.execute("BEGIN IMMEDIATE")
+                started_tx = True
+            if write:
+                self._tx_depth += 1
             try:
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA foreign_keys=ON")
-                conn.execute("PRAGMA synchronous=NORMAL")
-                if write:
-                    conn.execute("BEGIN IMMEDIATE")
                 yield conn
-                if write:
-                    conn.commit()
+                if started_tx and conn.in_transaction:
+                    conn.execute("COMMIT")
             except BaseException:
-                if write and conn.in_transaction:
-                    conn.rollback()
+                if started_tx and conn.in_transaction:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
                 raise
             finally:
-                conn.close()
+                if write:
+                    self._tx_depth = max(0, self._tx_depth - 1)
+
+    def close(self) -> None:
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                finally:
+                    self._conn = None
+                    self._tx_depth = 0
 
     def quick_check(self) -> str:
         with self.connection(write=False) as db:
@@ -275,6 +326,99 @@ class ActivityStore:
                 "SELECT * FROM activities WHERE id=?", (act_id,)
             ).fetchone()
             return self._hydrate_activity(row)  # type: ignore[return-value]
+
+    def create_activity_checked(
+        self,
+        *,
+        umo: str,
+        group_id: str,
+        category: str,
+        title: str,
+        description: str = "",
+        creator_uid: str,
+        creator_name: str,
+        stages: list[str] | str | None = None,
+        target_count: int | None = None,
+        min_participants: int | None = None,
+        max_participants: int = 30,
+        max_active_per_group: int = 5,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        """Atomically enforce per-group open limit and insert a new activity."""
+        limit = max(1, int(max_active_per_group))
+        with self.connection(write=True) as db:
+            open_cnt = int(
+                db.execute(
+                    "SELECT COUNT(*) FROM activities WHERE umo=? AND category!='mini_game' AND status IN ('recruiting', 'active')",
+                    (umo,),
+                ).fetchone()[0]
+            )
+            if open_cnt >= limit:
+                return (
+                    False,
+                    f"本群已有 {open_cnt} 个进行中的活动（上限 {limit} 个），请先完结或取消旧活动。",
+                    None,
+                )
+            act = self.create_activity(
+                umo=umo,
+                group_id=group_id,
+                category=category,
+                title=title,
+                description=description,
+                creator_uid=creator_uid,
+                creator_name=creator_name,
+                stages=stages,
+                target_count=target_count,
+                min_participants=min_participants,
+                max_participants=max_participants,
+                _connection=db,
+            )
+            return True, "创建成功", act
+
+    def expire_stale_activities(
+        self,
+        *,
+        max_age_seconds: float,
+        umo: str = "",
+        now: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Auto-cancel abandoned recruiting/active activities past inactivity TTL."""
+        age = float(max_age_seconds)
+        if age <= 0:
+            return []
+        ts = time.time() if now is None else float(now)
+        cutoff = ts - age
+        clause = "status IN ('recruiting', 'active') AND category!='mini_game' AND updated_at < ?"
+        params: tuple[Any, ...] = (cutoff, umo) if umo else (cutoff,)
+        if umo:
+            clause += " AND umo=?"
+        with self.connection(write=False) as db:
+            pending = db.execute(
+                f"SELECT id FROM activities WHERE {clause}", params
+            ).fetchall()
+        if not pending:
+            return []
+        note = "超时未推进，自动过期清理（流局不入群史记）"
+        with self.connection(write=True) as db:
+            rows = db.execute(
+                f"SELECT * FROM activities WHERE {clause}", params
+            ).fetchall()
+            if not rows:
+                return []
+            ids = [str(r["id"]) for r in rows]
+            placeholders = ",".join("?" for _ in ids)
+            db.execute(
+                f"UPDATE activities SET status='cancelled', closing_note=?, updated_at=?, revision=revision+1 WHERE id IN ({placeholders})",
+                (note, ts, *ids),
+            )
+            expired_rows = db.execute(
+                f"SELECT * FROM activities WHERE id IN ({placeholders})",
+                tuple(ids),
+            ).fetchall()
+            return [
+                act
+                for act in (self._hydrate_activity(r) for r in expired_rows)
+                if act is not None
+            ]
 
     def get_activity(
         self, activity_id: str, umo: str | None = None
@@ -896,25 +1040,76 @@ class ActivityStore:
             db.execute("DELETE FROM truth_room_handoffs WHERE room_id=?", (room_id,))
             return aid
 
-    def pending_truth_outcomes(self, *, memory: bool, chronicle: bool) -> list[str]:
+    def pending_outcome_syncs(
+        self,
+        *,
+        memory: bool,
+        chronicle: bool,
+        now: float | None = None,
+        max_attempts: int = 8,
+    ) -> list[str]:
+        """List all completed outcomes (activities + minigames) eligible for sync retry."""
+        ts = time.time() if now is None else float(now)
         with self.connection() as db:
-            return [str(row["activity_id"]) for row in db.execute(
-                """
-                SELECT o.activity_id
-                FROM truth_room_outcomes t JOIN outcomes o USING(activity_id)
-                WHERE
-                    (? AND o.memory_status IN (
-                        'pending', 'unavailable', 'error', 'not_initialized',
-                        'engine_unavailable', 'source_store_unavailable', 'memory_index_unavailable',
-                        'memory_write_failed', 'source_snapshot_changed'
-                    )) OR
-                    (? AND o.valuable AND o.chronicle_event_id=0
-                        AND o.chronicle_status IN ('pending', 'unavailable', 'error'))
-                ORDER BY o.updated_at ASC
-                LIMIT 50
-                """,
-                (memory, chronicle),
-            )]
+            return [
+                str(row["activity_id"])
+                for row in db.execute(
+                    """
+                    SELECT o.activity_id
+                    FROM outcomes o
+                    WHERE o.sync_attempts < ?
+                      AND o.next_sync_at <= ?
+                      AND (
+                        (? AND o.memory_status IN (
+                            'pending', 'unavailable', 'error', 'timeout', 'not_initialized',
+                            'engine_unavailable', 'source_store_unavailable', 'memory_index_unavailable',
+                            'memory_write_failed', 'source_snapshot_changed'
+                        )) OR
+                        (? AND o.valuable AND o.chronicle_event_id=0
+                            AND o.chronicle_status IN ('pending', 'unavailable', 'error', 'timeout'))
+                      )
+                    ORDER BY o.next_sync_at ASC, o.updated_at ASC
+                    LIMIT 50
+                    """,
+                    (max(1, int(max_attempts)), ts, memory, chronicle),
+                )
+            ]
+
+    def pending_truth_outcomes(self, *, memory: bool, chronicle: bool) -> list[str]:
+        return self.pending_outcome_syncs(memory=memory, chronicle=chronicle)
+
+    def record_sync_attempt(
+        self,
+        activity_id: str,
+        *,
+        succeeded: bool,
+        error: str = "",
+        now: float | None = None,
+        backoff_base: float = 30.0,
+        backoff_cap: float = 3600.0,
+    ) -> None:
+        ts = time.time() if now is None else float(now)
+        with self.connection(write=True) as db:
+            if succeeded:
+                db.execute(
+                    "UPDATE outcomes SET sync_attempts=0, next_sync_at=0, last_sync_error='', updated_at=? WHERE activity_id=?",
+                    (ts, activity_id),
+                )
+                return
+            row = db.execute(
+                "SELECT sync_attempts FROM outcomes WHERE activity_id=?",
+                (activity_id,),
+            ).fetchone()
+            attempts = int(row["sync_attempts"] if row else 0)
+            delay = (
+                0.0
+                if attempts == 0
+                else min(backoff_cap, backoff_base * (2 ** min(attempts - 1, 10)))
+            )
+            db.execute(
+                "UPDATE outcomes SET sync_attempts=sync_attempts+1, next_sync_at=?, last_sync_error=?, updated_at=? WHERE activity_id=?",
+                (ts + delay, str(error or "")[:300], ts, activity_id),
+            )
 
     def update_sync_status(
         self,

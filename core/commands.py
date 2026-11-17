@@ -7,7 +7,7 @@ import shlex
 from typing import Any
 
 from .coordinator import ActivityCoordinator
-from .models import CATEGORIES, ENGINE_CATALOG, resolve_category
+from .models import CATEGORIES, ENGINE_CATALOG
 
 
 def extract_group_and_sender(event: Any) -> tuple[str, str, str, str, bool]:
@@ -31,8 +31,6 @@ def extract_group_and_sender(event: Any) -> tuple[str, str, str, str, bool]:
         admin = bool(event.is_admin())
     except Exception:
         admin = False
-    raw_msg = getattr(event, "message_obj", None)
-    msg_id = str(getattr(raw_msg, "message_id", "") or "")
     return umo, gid, uid, name, admin
 
 
@@ -68,6 +66,7 @@ def build_help_text(module_states: dict[str, bool] | None = None) -> str:
         "· /活动 完结 [编号] [结项总结] — 完结定稿：生成成果册、经历存入「群间记忆」、达标成果入「群史记」",
         "· /活动 成果 [编号] — 查看已完结活动的汇编作品全文",
         "· /活动 取消 [编号] [原因] — 取消或流局（流局不入群史记）",
+        "· /活动 清理 [小时] — 群管理员手动清理超时未推进的滞留活动",
         "",
         "【快捷入口】",
         "· /共读 <书名或笔记> · /约局 <游戏名或集合信息> · /接龙 <主题或下一棒> · /挑战 <目标或打卡>",
@@ -398,6 +397,34 @@ async def handle_cancel_command(
         reason=reason,
     )
     return msg
+
+
+async def handle_cleanup_command(
+    coordinator: ActivityCoordinator, event: Any, raw_args: str = ""
+) -> str:
+    umo, gid, _, _, is_admin = extract_group_and_sender(event)
+    if not gid:
+        return "请在群聊中使用该指令。"
+    if not is_admin:
+        return "仅群管理员可使用 `/活动 清理` 清理超时滞留活动。"
+    raw = str(raw_args or "").strip()
+    max_age_seconds: float | None = None
+    if raw:
+        try:
+            hours = float(raw)
+        except ValueError:
+            return "用法：`/活动 清理 [超时小时数]`，例如 `/活动 清理 72`（留空则按默认配置）。"
+        if hours <= 0:
+            return "超时小时数必须大于 0。"
+        max_age_seconds = hours * 3600.0
+    expired = await coordinator.cleanup_stale_activities(
+        umo=umo, max_age_seconds=max_age_seconds
+    )
+    if not expired:
+        return "本群暂无超过时限未推进的滞留活动。"
+    titles = "、".join(f"`{a['id']}`《{a['title']}》" for a in expired[:8])
+    extra = f" 等共 {len(expired)} 个" if len(expired) > 8 else f"（共 {len(expired)} 个）"
+    return f"🧹 已自动清理超时滞留活动{extra}：{titles}（已流局，未入群史记）。"
 
 
 async def handle_outcome_command(

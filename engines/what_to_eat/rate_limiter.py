@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from typing import Any
 
 from astrbot.api import logger
 
@@ -41,6 +40,7 @@ class RateLimiter:
         self._response_history: dict[str, list[float]] = {}
         # 存储格式: {group_id: last_echo_timestamp}
         self._echo_cooldown_map: dict[str, float] = {}
+        self._last_global_cleanup: float = 0.0
         logger.info(
             f"频率限制器初始化: max={self.max_responses}, window={self.window_seconds}s, "
             f"echo_cooldown={self.echo_cooldown_enabled}, cooldown_seconds={self.echo_cooldown_seconds}s"
@@ -65,8 +65,9 @@ class RateLimiter:
             # 无群组 ID，允许响应但不强制推荐
             return True, False
 
-        # 先清理旧记录
+        # 先清理旧记录，并定期清理其他不活跃群组的过期记录
         self._cleanup_old_records(group_id)
+        self._maybe_prune_all_history()
 
         # 获取当前响应次数
         history = self._response_history.get(group_id, [])
@@ -116,6 +117,22 @@ class RateLimiter:
         # 移除空条目以节省内存
         if not self._response_history[group_id]:
             del self._response_history[group_id]
+
+    def _maybe_prune_all_history(self) -> None:
+        if len(self._response_history) <= 16:
+            return
+        now = time.time()
+        if now - self._last_global_cleanup < max(10.0, float(self.window_seconds)):
+            return
+        self._last_global_cleanup = now
+        cutoff = now - self.window_seconds
+        stale_keys = [
+            gid
+            for gid, timestamps in list(self._response_history.items())
+            if not timestamps or timestamps[-1] <= cutoff
+        ]
+        for gid in stale_keys:
+            self._response_history.pop(gid, None)
 
     def is_in_echo_cooldown(self, group_id: str) -> bool:
         """

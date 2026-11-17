@@ -10,9 +10,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import At, Plain
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context
 from astrbot.core.message.message_event_result import MessageEventResult
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
@@ -199,8 +199,16 @@ class Blackjack21Plugin(Component):
         self.config = config or {}
         # group_id -> Room：一群一桌，互不影响
         self.rooms: dict[str, Room] = {}
+        self._room_locks: dict[str, asyncio.Lock] = {}
         self.round_tasks: dict[str, asyncio.Task] = {}
         self.waiting_tasks: dict[str, asyncio.Task] = {}
+
+    def _room_lock(self, group_id: str) -> asyncio.Lock:
+        lock = self._room_locks.get(group_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._room_locks[group_id] = lock
+        return lock
 
     async def terminate(self):
         """Cancel pending timers on unload."""
@@ -208,6 +216,7 @@ class Blackjack21Plugin(Component):
             self._cancel_round_timer(gid)
         for gid in list(self.waiting_tasks):
             self._cancel_waiting_timer(gid)
+        self._room_locks.clear()
 
     def _mute_per_point(self) -> int:
         return max(1, int(self.config.get("mute_per_point", 10)))
@@ -399,14 +408,15 @@ class Blackjack21Plugin(Component):
                 await asyncio.sleep(timeout)
             except asyncio.CancelledError:
                 return
-            room_now = self.rooms.get(group_id)
-            if not room_now or room_now.phase != "waiting":
-                return
-            self.rooms.pop(group_id, None)
-            self.waiting_tasks.pop(group_id, None)
-            result = self._result(
-                f"⏰ 21点房间创建后 {timeout // 60} 分钟仍未开始，已自动关闭。"
-            )
+            async with self._room_lock(group_id):
+                room_now = self.rooms.get(group_id)
+                if not room_now or room_now.phase != "waiting":
+                    return
+                self.rooms.pop(group_id, None)
+                self.waiting_tasks.pop(group_id, None)
+                result = self._result(
+                    f"⏰ 21点房间创建后 {timeout // 60} 分钟仍未开始，已自动关闭。"
+                )
             await self._send_group(room_now, result)
 
         self.waiting_tasks[group_id] = asyncio.create_task(_on_waiting_timeout())
@@ -422,10 +432,11 @@ class Blackjack21Plugin(Component):
         async def _on_timeout() -> None:
             try:
                 await asyncio.sleep(timeout)
-                room_now = self.rooms.get(group_id)
-                if room_now is not None and bot is not None and room_now.bot is None:
-                    room_now.bot = bot
-                await self._handle_round_timeout(group_id, round_no)
+                async with self._room_lock(group_id):
+                    room_now = self.rooms.get(group_id)
+                    if room_now is not None and bot is not None and room_now.bot is None:
+                        room_now.bot = bot
+                    await self._handle_round_timeout(group_id, round_no)
             except asyncio.CancelledError:
                 return
             except Exception as exc:  # noqa: BLE001
@@ -843,37 +854,36 @@ class Blackjack21Plugin(Component):
             yield event.plain_result("21点只能在群里玩。")
             return
 
-        existing = self.rooms.get(group_id)
-        if existing and existing.phase != "finished":
-            yield event.plain_result(
-                "本群已有进行中的21点，先打完或管理员发 /结束21点。"
-            )
-            return
-
-        uid = str(event.get_sender_id())
-        room = Room(
-            group_id=group_id,
-            host_id=uid,
-            joker_mode=self._joker_mode(),
-        )
-        self._bind_event(room, event)
-        room.players[uid] = Player(user_id=uid, is_host=True)
-        self.rooms[group_id] = room
-        self._arm_waiting_timer(room)
-        wait_min = self._waiting_timeout() // 60
-        joker_tip = ""
-        if room.joker_mode:
-            joker_tip = " ·小丑模式已开启"
-        yield self._result(
-            "🃏 ",
-            room.players[uid],
-            " 创建了21点房间，并成为管理员！\n"
-            "其他人发 /加入21点\n"
-            "人齐后管理员发 /开始21点\n"
-            f"规则说明：/21点帮助{joker_tip}\n"
-            f"（{wait_min} 分钟内未开始将自动关闭）\n",
-            *self._room_parts(room),
-        )
+        async with self._room_lock(group_id):
+            existing = self.rooms.get(group_id)
+            if existing and existing.phase != "finished":
+                reply = event.plain_result(
+                    "本群已有进行中的21点，先打完或管理员发 /结束21点。"
+                )
+            else:
+                uid = str(event.get_sender_id())
+                room = Room(
+                    group_id=group_id,
+                    host_id=uid,
+                    joker_mode=self._joker_mode(),
+                )
+                self._bind_event(room, event)
+                room.players[uid] = Player(user_id=uid, is_host=True)
+                self.rooms[group_id] = room
+                self._arm_waiting_timer(room)
+                wait_min = self._waiting_timeout() // 60
+                joker_tip = " ·小丑模式已开启" if room.joker_mode else ""
+                reply = self._result(
+                    "🃏 ",
+                    room.players[uid],
+                    " 创建了21点房间，并成为管理员！\n"
+                    "其他人发 /加入21点\n"
+                    "人齐后管理员发 /开始21点\n"
+                    f"规则说明：/21点帮助{joker_tip}\n"
+                    f"（{wait_min} 分钟内未开始将自动关闭）\n",
+                    *self._room_parts(room),
+                )
+        yield reply
 
     async def cmd_join(self, event: AstrMessageEvent):
         """Join the waiting room."""
@@ -882,27 +892,26 @@ class Blackjack21Plugin(Component):
             yield event.plain_result("21点只能在群里玩。")
             return
 
-        room = self.rooms.get(group_id)
-        if not room or room.phase != "waiting":
-            yield event.plain_result("当前没有可加入的21点房间，先 /创建21点。")
-            return
-
-        uid = str(event.get_sender_id())
-        if uid in room.players:
-            yield event.plain_result("你已经在房间里了。")
-            return
-        if len(room.players) >= self._max_players():
-            yield event.plain_result(f"满员了（最多 {self._max_players()} 人）。")
-            return
-
-        room.players[uid] = Player(user_id=uid)
-        self._bind_event(room, event)
-        yield self._result(
-            "✅ ",
-            room.players[uid],
-            " 已加入！\n",
-            *self._room_parts(room),
-        )
+        async with self._room_lock(group_id):
+            room = self.rooms.get(group_id)
+            if not room or room.phase != "waiting":
+                reply = event.plain_result("当前没有可加入的21点房间，先 /创建21点。")
+            else:
+                uid = str(event.get_sender_id())
+                if uid in room.players:
+                    reply = event.plain_result("你已经在房间里了。")
+                elif len(room.players) >= self._max_players():
+                    reply = event.plain_result(f"满员了（最多 {self._max_players()} 人）。")
+                else:
+                    room.players[uid] = Player(user_id=uid)
+                    self._bind_event(room, event)
+                    reply = self._result(
+                        "✅ ",
+                        room.players[uid],
+                        " 已加入！\n",
+                        *self._room_parts(room),
+                    )
+        yield reply
 
     async def cmd_deal(self, event: AstrMessageEvent):
         """Room admin starts the game and opens round 1."""
@@ -911,139 +920,142 @@ class Blackjack21Plugin(Component):
             yield event.plain_result("21点只能在群里玩。")
             return
 
-        room = self.rooms.get(group_id)
-        if not room or room.phase != "waiting":
-            yield event.plain_result("没有等待中的21点房间，先 /创建21点。")
-            return
+        async with self._room_lock(group_id):
+            room = self.rooms.get(group_id)
+            if not room or room.phase != "waiting":
+                reply = event.plain_result("没有等待中的21点房间，先 /创建21点。")
+            else:
+                uid = str(event.get_sender_id())
+                if uid != room.host_id:
+                    reply = event.plain_result("只有本局管理员能 /开始21点。")
+                elif len(room.players) < 2:
+                    reply = event.plain_result("至少还要再来 1 人 /加入21点 才能开始。")
+                else:
+                    self._bind_event(room, event)
+                    room.joker_mode = self._joker_mode()
+                    room.started_at_ns = time.time_ns()
+                    room.shuffle_seq = 0
+                    room.discard = []
+                    room.deck = self._new_deck(room)
+                    room.phase = "playing"
+                    self._cancel_waiting_timer(group_id)
+                    for _ in range(2):
+                        for p in room.players.values():
+                            self._deal_one(room, p)
 
-        uid = str(event.get_sender_id())
-        if uid != room.host_id:
-            yield event.plain_result("只有本局管理员能 /开始21点。")
-            return
-        if len(room.players) < 2:
-            yield event.plain_result("至少还要再来 1 人 /加入21点 才能开始。")
-            return
+                    for p in room.players.values():
+                        if hand_value(p.cards) == 21:
+                            p.stood = True
 
-        self._bind_event(room, event)
-        room.joker_mode = self._joker_mode()
-        room.started_at_ns = time.time_ns()
-        room.shuffle_seq = 0
-        room.discard = []
-        room.deck = self._new_deck(room)
-        room.phase = "playing"
-        self._cancel_waiting_timer(group_id)
-        for _ in range(2):
-            for p in room.players.values():
-                self._deal_one(room, p)
-
-        for p in room.players.values():
-            if hand_value(p.cards) == 21:
-                p.stood = True
-
-        if not self._active_players(room):
-            yield self._result(
-                "🃏 开局后无人可继续操作。\n\n",
-                *(await self._settle(room)),
-            )
-            return
-
-        self._begin_round(room, bot=room.bot)
-        joker_line = (
-            "小丑模式已开启（完整规则见 /21点帮助）。\n" if room.joker_mode else ""
-        )
-        yield self._result(
-            "🃏 开局！同步回合制：本轮所有未停手的人都要选一次，"
-            "全员选完后才统一要牌并进入下一轮。\n"
-            f"每轮限时 {self._round_timeout()} 秒，超时未操作视为停手。\n"
-            "已停手的人不能再要牌。\n"
-            f"与第一相差 1 点禁言 {self._mute_per_point()} 秒。\n"
-            f"{joker_line}"
-            "规则：/21点帮助\n"
-            "请发 /要牌 或 /停牌\n",
-            *self._room_parts(room),
-        )
+                    if not self._active_players(room):
+                        reply = self._result(
+                            "🃏 开局后无人可继续操作。\n\n",
+                            *(await self._settle(room)),
+                        )
+                    else:
+                        self._begin_round(room, bot=room.bot)
+                        joker_line = (
+                            "小丑模式已开启（完整规则见 /21点帮助）。\n"
+                            if room.joker_mode
+                            else ""
+                        )
+                        reply = self._result(
+                            "🃏 开局！同步回合制：本轮所有未停手的人都要选一次，"
+                            "全员选完后才统一要牌并进入下一轮。\n"
+                            f"每轮限时 {self._round_timeout()} 秒，超时未操作视为停手。\n"
+                            "已停手的人不能再要牌。\n"
+                            f"与第一相差 1 点禁言 {self._mute_per_point()} 秒。\n"
+                            f"{joker_line}"
+                            "规则：/21点帮助\n"
+                            "请发 /要牌 或 /停牌\n",
+                            *self._room_parts(room),
+                        )
+        yield reply
 
     async def cmd_hit(self, event: AstrMessageEvent):
         """Choose to draw one card this round (resolved when all have chosen)."""
-        group_id = event.get_group_id()
-        room = self.rooms.get(group_id or "")
-        if not room or room.phase != "playing":
-            yield event.plain_result("现在没有进行中的21点。")
-            return
-
-        self._bind_event(room, event)
-        uid = str(event.get_sender_id())
-        player = room.players.get(uid)
-        if not player:
-            yield event.plain_result("你不在这个房间。")
-            return
-        if player.stood:
-            yield event.plain_result("你已经停手了，不能再要牌。")
-            return
-        if player.busted:
-            yield event.plain_result("你已经超过21，不能再要牌。")
-            return
-        if uid in room.round_actions:
-            choice = "要牌" if room.round_actions[uid] == "hit" else "停手"
-            yield event.plain_result(f"你本轮已经选过了（{choice}），等其他人选完。")
-            return
-
-        room.round_actions[uid] = "hit"
-        yield await self._after_choice(
-            room,
-            ["📝 ", player, " 本轮选择：要牌（等全员选完再发）"],
-        )
+        group_id = event.get_group_id() or ""
+        async with self._room_lock(group_id):
+            room = self.rooms.get(group_id)
+            if not room or room.phase != "playing":
+                reply = event.plain_result("现在没有进行中的21点。")
+            else:
+                self._bind_event(room, event)
+                uid = str(event.get_sender_id())
+                player = room.players.get(uid)
+                if not player:
+                    reply = event.plain_result("你不在这个房间。")
+                elif player.stood:
+                    reply = event.plain_result("你已经停手了，不能再要牌。")
+                elif player.busted:
+                    reply = event.plain_result("你已经超过21，不能再要牌。")
+                elif uid in room.round_actions:
+                    choice = "要牌" if room.round_actions[uid] == "hit" else "停手"
+                    reply = event.plain_result(
+                        f"你本轮已经选过了（{choice}），等其他人选完。"
+                    )
+                else:
+                    room.round_actions[uid] = "hit"
+                    reply = await self._after_choice(
+                        room,
+                        ["📝 ", player, " 本轮选择：要牌（等全员选完再发）"],
+                    )
+        yield reply
 
     async def cmd_stand(self, event: AstrMessageEvent):
         """Choose to stand this round (permanent once the round resolves)."""
-        group_id = event.get_group_id()
-        room = self.rooms.get(group_id or "")
-        if not room or room.phase != "playing":
-            yield event.plain_result("现在没有进行中的21点。")
-            return
-
-        self._bind_event(room, event)
-        uid = str(event.get_sender_id())
-        player = room.players.get(uid)
-        if not player:
-            yield event.plain_result("你不在这个房间。")
-            return
-        if player.done:
-            yield event.plain_result("你已经停手或超过21了。")
-            return
-        if uid in room.round_actions:
-            choice = "要牌" if room.round_actions[uid] == "hit" else "停手"
-            yield event.plain_result(f"你本轮已经选过了（{choice}），等其他人选完。")
-            return
-
-        room.round_actions[uid] = "stand"
-        yield await self._after_choice(
-            room,
-            ["📝 ", player, " 本轮选择：停手（确认后本局不能再要）"],
-        )
+        group_id = event.get_group_id() or ""
+        async with self._room_lock(group_id):
+            room = self.rooms.get(group_id)
+            if not room or room.phase != "playing":
+                reply = event.plain_result("现在没有进行中的21点。")
+            else:
+                self._bind_event(room, event)
+                uid = str(event.get_sender_id())
+                player = room.players.get(uid)
+                if not player:
+                    reply = event.plain_result("你不在这个房间。")
+                elif player.done:
+                    reply = event.plain_result("你已经停手或超过21了。")
+                elif uid in room.round_actions:
+                    choice = "要牌" if room.round_actions[uid] == "hit" else "停手"
+                    reply = event.plain_result(
+                        f"你本轮已经选过了（{choice}），等其他人选完。"
+                    )
+                else:
+                    room.round_actions[uid] = "stand"
+                    reply = await self._after_choice(
+                        room,
+                        ["📝 ", player, " 本轮选择：停手（确认后本局不能再要）"],
+                    )
+        yield reply
 
     async def cmd_status(self, event: AstrMessageEvent):
         """Show current room."""
-        group_id = event.get_group_id()
-        room = self.rooms.get(group_id or "")
-        if not room:
-            yield event.plain_result("本群没有21点房间。发 /创建21点 开一局。")
-            return
-        self._bind_event(room, event)
-        yield self._result(*self._room_parts(room))
+        group_id = event.get_group_id() or ""
+        async with self._room_lock(group_id):
+            room = self.rooms.get(group_id)
+            if not room:
+                reply = event.plain_result("本群没有21点房间。发 /创建21点 开一局。")
+            else:
+                self._bind_event(room, event)
+                reply = self._result(*self._room_parts(room))
+        yield reply
 
     async def cmd_end(self, event: AstrMessageEvent):
         """Room admin cancels the room."""
-        group_id = event.get_group_id()
-        room = self.rooms.get(group_id or "")
-        if not room:
-            yield event.plain_result("本群没有21点房间。")
-            return
-        uid = str(event.get_sender_id())
-        if uid != room.host_id and not event.is_admin():
-            yield event.plain_result("只有本局管理员（或机器人管理员）能结束房间。")
-            return
-        self._cancel_round_timer(group_id)
-        self._cancel_waiting_timer(group_id)
-        self.rooms.pop(group_id, None)
-        yield event.plain_result("21点房间已结束。")
+        group_id = event.get_group_id() or ""
+        async with self._room_lock(group_id):
+            room = self.rooms.get(group_id)
+            if not room:
+                reply = event.plain_result("本群没有21点房间。")
+            else:
+                uid = str(event.get_sender_id())
+                if uid != room.host_id and not event.is_admin():
+                    reply = event.plain_result("只有本局管理员（或机器人管理员）能结束房间。")
+                else:
+                    self._cancel_round_timer(group_id)
+                    self._cancel_waiting_timer(group_id)
+                    self.rooms.pop(group_id, None)
+                    reply = event.plain_result("21点房间已结束。")
+        yield reply

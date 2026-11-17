@@ -48,6 +48,11 @@
         "description": "单群同时进行活动上限",
         "type": "int",
         "default": 5
+      },
+      "stale_expire_hours": {
+        "description": "超时未推进活动自动流局清理（小时，0 关闭）",
+        "type": "int",
+        "default": 168
       }
     }
   },

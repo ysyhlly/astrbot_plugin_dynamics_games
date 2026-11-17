@@ -9,9 +9,9 @@ import random
 import re
 
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import At, AtAll
-from astrbot.api.star import Context, Star
+from astrbot.api.star import Context
 
 from .food_api import FoodApiClient
 from .food_data import FoodDataManager
@@ -603,6 +603,12 @@ class WhatToEatPlugin(Component):
 
     async def terminate(self) -> None:
         """插件卸载时调用。"""
+        try:
+            tm = getattr(self, "taste_memory", None)
+            if tm is not None and callable(getattr(tm, "flush", None)):
+                await asyncio.to_thread(tm.flush)
+        except Exception as e:
+            logger.debug(f"刷盘口味记忆时出错: {e}")
         try:
             if self.food_api is not None:
                 await self.food_api.close()

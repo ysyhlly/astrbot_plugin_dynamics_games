@@ -20,7 +20,7 @@ BASELINE_ROOT = REPO_ROOT / "work" / "dynamics-games-20261113" / "baseline"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from astrbot_plugin_dynamics_games.core.commands import (
+from astrbot_plugin_dynamics_games.core.commands import (  # noqa: E402
     build_arcade_text,
     build_help_text,
     handle_cancel_command,
@@ -34,16 +34,15 @@ from astrbot_plugin_dynamics_games.core.commands import (
     handle_stage_command,
     handle_submit_command,
 )
-from astrbot_plugin_dynamics_games.core.coordinator import ActivityCoordinator
-from astrbot_plugin_dynamics_games.core.models import (
+from astrbot_plugin_dynamics_games.core.coordinator import ActivityCoordinator  # noqa: E402
+from astrbot_plugin_dynamics_games.core.models import (  # noqa: E402
     CATEGORIES,
     ENGINE_CATALOG,
-    evaluate_outcome_worthiness,
     parse_stages,
     resolve_category,
 )
-from astrbot_plugin_dynamics_games.core.store import ActivityStore
-from astrbot_plugin_dynamics_games.runtime import ConfigSection, LEGACY_PLUGIN_IDS
+from astrbot_plugin_dynamics_games.core.store import ActivityStore  # noqa: E402
+from astrbot_plugin_dynamics_games.runtime import ConfigSection, LEGACY_PLUGIN_IDS  # noqa: E402
 
 
 class FakeEvent:
@@ -367,7 +366,7 @@ def test_real_group_chronicle_archive_store_integration(tmp_path: pathlib.Path):
     ast.parse(patch_life.read_text(encoding="utf-8"))
     sys.path.insert(0, str(gc_base))
     try:
-        from core.archive_store import ArchiveStore, encode  # type: ignore
+        from core.archive_store import ArchiveStore  # type: ignore
 
         archive = ArchiveStore(tmp_path / "history.sqlite3")
         umo = "aiocqhttp:GroupMessage:555888"
