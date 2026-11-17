@@ -33,6 +33,14 @@ PERSONA_MODE_CORE = "core_persona"
 PERSONA_MODE_CUSTOM = "custom_prompt"
 
 
+def _series_defaults(context: Any) -> dict[str, Any]:
+    try:
+        from ....series_panels import get_series_defaults
+    except ImportError:
+        return {}
+    return get_series_defaults(context)
+
+
 async def resolve_system_prompt(
     context: Any, config: dict, umo: str | None = None
 ) -> str | None:
@@ -67,8 +75,10 @@ async def resolve_system_prompt(
         logger.warning("[persona] 未检测到 persona_manager, 按中立提示词处理")
         return None
 
-    persona_id = _cfg_get(config, "persona_id", "")
-    if not persona_id or not str(persona_id).strip():
+    persona_id = str(_cfg_get(config, "persona_id", "") or "").strip()
+    if not persona_id:
+        persona_id = str(_series_defaults(context).get("persona_id", "") or "").strip()
+    if not persona_id:
         logger.warning("[persona] 未配置有效的 persona_id, 按中立提示词处理")
         return None
 

@@ -47,6 +47,14 @@ from .persona import resolve_system_prompt
 
 logger = logging.getLogger(__name__)
 
+
+def _inherit_provider(explicit: Any, context: Any) -> str:
+    try:
+        from ....series_panels import inherit_provider
+    except ImportError:
+        return str(explicit or "").strip()
+    return inherit_provider(explicit, context, role="reply")
+
 #: Regex patterns matched against the NORMALIZED question text (safe mode
 #: only). Multi-character patterns use ``\s*`` between characters so spaced
 #: variants of the same term are also caught. Covers sexual / hate /
@@ -279,7 +287,7 @@ async def build_question(
     system_prompt = await resolve_system_prompt(context, config, umo)
     if not system_prompt:
         system_prompt = NEUTRAL_SYSTEM_PROMPT
-    provider_id = str(_cfg_get(config, "llm_provider_id", "") or "")
+    provider_id = _inherit_provider(_cfg_get(config, "llm_provider_id", ""), context)
     timeout = float(_cfg_get(config, "llm_timeout_seconds", 60) or 60)
     user_prompt = _build_user_prompt(
         config,

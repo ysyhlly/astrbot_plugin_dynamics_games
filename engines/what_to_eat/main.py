@@ -22,6 +22,22 @@ from .responder import Responder
 from .taste_memory import TasteMemoryStore
 
 
+def _series_defaults(context):
+    try:
+        from ...series_panels import get_series_defaults
+    except ImportError:
+        return {}
+    return get_series_defaults(context)
+
+
+def _inherit_provider(explicit, context) -> str:
+    try:
+        from ...series_panels import inherit_provider
+    except ImportError:
+        return str(explicit or "").strip()
+    return inherit_provider(explicit, context, role="reply")
+
+
 class WhatToEatPlugin(Component):
     """
     吃什么推荐插件。
@@ -159,8 +175,10 @@ class WhatToEatPlugin(Component):
 
         # LLM + 人格（失败时自动回退模板）
         llm_enabled = bool(config.get("llm_enabled", True))
-        llm_provider_id = str(config.get("llm_provider_id", "") or "")
-        llm_persona_id = str(config.get("llm_persona_id", "") or "")
+        llm_provider_id = _inherit_provider(config.get("llm_provider_id", ""), context)
+        llm_persona_id = str(config.get("llm_persona_id", "") or "").strip()
+        if not llm_persona_id:
+            llm_persona_id = str(_series_defaults(context).get("persona_id", "") or "").strip()
         llm_use_session_persona = bool(config.get("llm_use_session_persona", True))
         llm_also_for_echo = bool(config.get("llm_also_for_echo", True))
         self.persona_llm = PersonaLLMResponder(

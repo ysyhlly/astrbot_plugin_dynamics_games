@@ -3,18 +3,48 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import sys
 from pathlib import Path
+from typing import Any
+
+RELOAD_BOOTSTRAP_VERSION = 2
+
+_VERSION_LINE_RE = re.compile(
+    r"""^\s*version\s*:\s*(?:"([^"#\r\n]+)"|'([^'#\r\n]+)'|([^\s#\r\n]+))"""
+)
+
+
+def _read_metadata_version(root: Path) -> str | None:
+    """Read the declared plugin version from metadata.yaml without YAML dependency."""
+    meta_path = root / "metadata.yaml"
+    try:
+        if not meta_path.is_file():
+            return None
+        text = meta_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        match = _VERSION_LINE_RE.match(line)
+        if match:
+            ver = next((group.strip() for group in match.groups() if group), "")
+            if ver:
+                return ver
+    return None
 
 
 def ensure_current(
-    package: str,
-    main_module: str,
-    entry_path: str,
-    checks=(),
-    version=None,
-) -> None:
-    """Drop stale owned imports before the main module imports its dependencies."""
+    package: str, main_module: str, entry_path: str, checks=(), version=None
+):
+    """Drop stale owned imports before the main module imports its dependencies.
+
+    Args:
+        package: The plugin's exact import package.
+        main_module: Currently executing entry module, retained throughout.
+        entry_path: Current plugin main file.
+        checks: Existing module/class/field signatures that distinguish old code.
+        version: Optional package version; falls back to metadata.yaml when omitted.
+    """
     parent = sys.modules.get(package)
     if parent is None or not package:
         return
@@ -26,6 +56,10 @@ def ensure_current(
             root.rglob("*.py"), key=lambda item: item.relative_to(root).as_posix()
         )
     except OSError:
+        # An unreadable source tree must not break plugin import. Leave the
+        # recorded fingerprint and the loaded modules untouched instead of
+        # degrading to an empty digest (which would silently disable change
+        # detection, or trigger a bogus purge).
         return
     for path in sources:
         if any(part in excluded for part in path.relative_to(root).parts):
@@ -34,29 +68,34 @@ def ensure_current(
             digest.update(path.relative_to(root).as_posix().encode())
             digest.update(path.read_bytes())
         except OSError:
+            # A partially readable tree yields a bogus fingerprint; abandon the
+            # comparison rather than purging modules based on it.
             return
-    if version is not None:
-        digest.update(str(version).encode())
-    fingerprint = digest.hexdigest()
-    recorded = getattr(parent, "_dynamics_games_fingerprint", None)
-    stale = recorded is not None and recorded != fingerprint
-    if not stale:
-        for mod_rel, cls_name, attr_name in checks:
-            mod = sys.modules.get(f"{package}.{mod_rel}")
-            if mod is not None:
-                cls = getattr(mod, cls_name, None)
-                if cls is None or not hasattr(cls, attr_name):
-                    stale = True
-                    break
-    if stale:
+    stamp = digest.hexdigest()
+    previous = getattr(parent, "_narrative_loaded_source_fingerprint", None)
+    incompatible = False
+    for module_name, class_name, attribute in checks:
+        module = sys.modules.get(package + "." + module_name)
+        candidate = getattr(module, class_name, None)
+        if candidate is not None and not (
+            hasattr(candidate, attribute)
+            or attribute in getattr(candidate, "__dataclass_fields__", {})
+            or attribute in getattr(candidate, "model_fields", {})
+        ):
+            incompatible = True
+    if incompatible or previous is not None and previous != stamp:
         prefix = package + "."
-        for mod_name in list(sys.modules):
-            if mod_name != main_module and mod_name.startswith(prefix):
-                mod = sys.modules.pop(mod_name, None)
-                sub = mod_name[len(prefix) :].split(".", 1)[0]
-                if hasattr(parent, sub) and getattr(parent, sub) is mod:
-                    try:
-                        delattr(parent, sub)
-                    except AttributeError:
-                        pass
-    parent._dynamics_games_fingerprint = fingerprint
+        keep = {main_module, __name__}
+        for name in tuple(sys.modules):
+            if not name.startswith(prefix) or name in keep:
+                continue
+            module = sys.modules.pop(name)
+            owner_name, attribute = name.rsplit(".", 1)
+            owner = sys.modules.get(owner_name)
+            if owner is not None and getattr(owner, attribute, None) is module:
+                delattr(owner, attribute)
+    parent_obj: Any = parent
+    parent_obj._narrative_loaded_source_fingerprint = stamp
+    resolved_version = version if version is not None else _read_metadata_version(root)
+    if resolved_version is not None:
+        parent_obj.__version__ = resolved_version
