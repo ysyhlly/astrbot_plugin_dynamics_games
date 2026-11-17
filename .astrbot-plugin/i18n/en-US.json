@@ -1,0 +1,12 @@
+{
+  "pages": {
+    "games": {
+      "title": "Dynamics Games",
+      "description": "Complete things together: signups, stages, progress, outcomes, and mini-game engines."
+    }
+  },
+  "metadata": {
+    "display_name": "Dynamics Games",
+    "desc": "Collaborative reading, matchmaking, relay writing, challenges, and co-creation with 4 integrated mini-game engines."
+  }
+}

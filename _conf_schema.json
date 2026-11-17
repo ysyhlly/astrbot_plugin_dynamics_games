@@ -1,0 +1,717 @@
+{
+  "activities": {
+    "description": "一起完成一件事 · 群间协作引擎设置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用群间协作活动（共读/约局/接龙/挑战/共创）",
+        "type": "bool",
+        "default": true
+      },
+      "memory_sync_enabled": {
+        "description": "联动「群间记忆」保存共同参与经历",
+        "type": "bool",
+        "default": true,
+        "hint": "活动完结时，将真实参与名单与活动经历归档至群间记忆（astrbot_plugin_dynamics_memory）。"
+      },
+      "chronicle_sync_enabled": {
+        "description": "联动「群史记」收录有价值的完结成果",
+        "type": "bool",
+        "default": true,
+        "hint": "仅完结且达到人数与贡献阈值的有效成果才会提交群史记；中途取消或流局绝不入史。"
+      },
+      "chronicle_admission_mode": {
+        "description": "群史记入史准入策略",
+        "type": "string",
+        "options": [
+          "auto",
+          "pending"
+        ],
+        "labels": [
+          "自动核验入史（多人协作自动通过，敏感词转待审）",
+          "全部转入群史记待审队列"
+        ],
+        "default": "auto"
+      },
+      "min_chronicle_participants": {
+        "description": "入史最低实际参与人数",
+        "type": "int",
+        "default": 2,
+        "hint": "少于该人数的单人练习仅留存在活动台账与记忆，不入群史记。"
+      },
+      "min_chronicle_contributions": {
+        "description": "入史最低有效阶段/作品记录条数",
+        "type": "int",
+        "default": 2
+      },
+      "max_active_per_group": {
+        "description": "单群同时进行活动上限",
+        "type": "int",
+        "default": 5
+      }
+    }
+  },
+  "modules": {
+    "description": "已整合娱乐与小游戏引擎总开关",
+    "type": "object",
+    "items": {
+      "enable_truth_game": {
+        "description": "启用「真心话」多人回合局",
+        "type": "bool",
+        "default": true
+      },
+      "enable_blackjack21": {
+        "description": "启用「21点」多人约局",
+        "type": "bool",
+        "default": true
+      },
+      "enable_rollpig": {
+        "description": "启用「今日小猪」图鉴抽取",
+        "type": "bool",
+        "default": true
+      },
+      "enable_what_to_eat": {
+        "description": "启用「是啊，吃什么」口味记忆推荐",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "truth_game": {
+    "description": "真心话引擎配置",
+    "type": "object",
+    "items": {
+      "llm_provider_id": {
+        "description": "🤖 用于生成真心话问题的 LLM 提供商",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "在 AstrBot 已配置的 LLM 中选择。留空则使用当前会话正在使用的默认 LLM"
+      },
+      "persona_mode": {
+        "description": "🎭 出题人格模式",
+        "type": "string",
+        "options": [
+          "off",
+          "core_persona",
+          "custom_prompt"
+        ],
+        "labels": [
+          "关闭（使用默认系统提示词）",
+          "核心人格（core persona）",
+          "自定义提示词"
+        ],
+        "default": "off",
+        "hint": "生成真心话问题时使用的人格模式。off：使用插件内置默认提示词；core_persona：使用 AstrBot 中指定的人格 ID；custom_prompt：使用下方自定义系统提示词"
+      },
+      "persona_id": {
+        "description": "🪪 人格 ID（core_persona 模式）",
+        "type": "string",
+        "default": "",
+        "_special": "select_persona",
+        "hint": "persona_mode 为 core_persona 时使用的人格 ID，可在 AstrBot 人格管理中获得"
+      },
+      "custom_persona_prompt": {
+        "description": "📝 自定义系统提示词（custom_prompt 模式）",
+        "type": "text",
+        "default": "",
+        "hint": "persona_mode 为 custom_prompt 时使用的自定义系统提示词，用于指导 LLM 出题"
+      },
+      "bot_ask_enabled": {
+        "description": "🤖 允许机器人提问",
+        "type": "bool",
+        "default": true,
+        "hint": "开启（默认）后机器人可能被抽为提问者参与出题；关闭则提问者只能是群成员。1 人开局时强制机器人提问，不受概率影响"
+      },
+      "bot_ask_frequency": {
+        "description": "🎲 机器人提问概率",
+        "type": "float",
+        "default": 0.5,
+        "hint": "每轮机器人被抽为提问者的概率，取值 0.0-1.0（越界自动收敛）。仅 1 人开局时强制机器人提问，不按此概率"
+      },
+      "content_mode": {
+        "description": "🌸 内容模式",
+        "type": "string",
+        "options": [
+          "safe",
+          "unsafe"
+        ],
+        "labels": [
+          "安全（仅安全向问题）",
+          "非安全（允许敏感向问题）"
+        ],
+        "default": "safe",
+        "hint": "safe：只出安全向问题（默认）；unsafe：允许出敏感向问题。注意：仅当全局开关 allow_unsafe 开启时 unsafe 模式才会生效"
+      },
+      "allow_unsafe": {
+        "description": "🔓 允许非安全内容（全局开关）",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭（默认）时无论 content_mode 为何值，只出安全向问题；开启后才允许 content_mode=unsafe 生效，且该模式可触及非安全题库"
+      },
+      "question_source": {
+        "description": "🔀 题目来源",
+        "type": "string",
+        "options": [
+          "llm_first",
+          "bank_only"
+        ],
+        "labels": [
+          "LLM 优先（失败回退题库）",
+          "仅内置题库"
+        ],
+        "default": "llm_first",
+        "hint": "llm_first：优先用 LLM 现场出题，失败或超时自动回退内置题库；bank_only：只从内置题库抽题，不调用 LLM"
+      },
+      "enable_livingmemory": {
+        "description": "🧠 使用 LivingMemory 记忆增强",
+        "type": "bool",
+        "default": true,
+        "hint": "开启（默认）且已安装 LivingMemory 插件时，出题参考被提问者的长期记忆，问题更贴合个人；未安装该插件时自动降级为通用出题，不影响游玩"
+      },
+      "memory_k": {
+        "description": "📚 记忆检索条数",
+        "type": "int",
+        "default": 5,
+        "hint": "使用 LivingMemory 增强时，检索的被提问者相关记忆条数（至少 1，自动收敛）"
+      },
+      "recent_qs_in_prompt": {
+        "description": "🔁 提示词中最近题目数",
+        "type": "int",
+        "default": 5,
+        "hint": "出题时注入提示词、提醒 LLM 不要重复的最近题目数量（0 表示不注入，自动收敛为非负数）"
+      },
+      "max_players": {
+        "description": "👥 最大玩家数",
+        "type": "int",
+        "default": 20,
+        "hint": "单局最多参与人数（含房主），超出后拒绝报名"
+      },
+      "min_players": {
+        "description": "👥 最少玩家数",
+        "type": "int",
+        "default": 2,
+        "hint": "开局最少人数（至少 2，自动收敛）；开启 bot_ask_enabled 时可 1 人开局"
+      },
+      "waiting_timeout_seconds": {
+        "description": "⏳ 等待开局超时（秒）",
+        "type": "int",
+        "default": 600,
+        "hint": "创建房间后若一直未开始，到时自动关闭（默认 600 秒 = 10 分钟）；期间有人加入会重置计时"
+      },
+      "round_idle_seconds": {
+        "description": "🕐 轮次空闲超时（秒）",
+        "type": "int",
+        "default": 300,
+        "hint": "当前轮超时无人操作时自动进入下一题（默认 300 秒 = 5 分钟）"
+      },
+      "max_idle_rounds": {
+        "description": "🚪 最大连续空闲轮数",
+        "type": "int",
+        "default": 3,
+        "hint": "连续空闲（无人操作）轮数达到此值时自动结束游戏（至少 1，自动收敛）"
+      },
+      "max_questions_per_game": {
+        "description": "🎯 单局最大题数",
+        "type": "int",
+        "default": 30,
+        "hint": "单局出题达到此数量后自动结算并结束游戏"
+      },
+      "llm_timeout_seconds": {
+        "description": "⏱️ LLM 调用超时（秒）",
+        "type": "int",
+        "default": 60,
+        "hint": "单次 LLM 出题的超时上限（至少 10，自动收敛）；超时后回退内置题库，避免房间长时间卡住"
+      },
+      "asker_choice_timeout_seconds": {
+        "description": "🤔 提问者选择出题方式的等待秒数（含打字时间）",
+        "type": "int",
+        "default": 60,
+        "hint": "提问者（群成员）在等待期间自行出题或选择让机器人出题；超时未操作则由机器人出题（至少 1，自动收敛）"
+      }
+    }
+  },
+  "blackjack21": {
+    "description": "21点引擎配置",
+    "type": "object",
+    "items": {
+      "mute_per_point": {
+        "description": "每差1点禁言秒数",
+        "type": "int",
+        "hint": "输家禁言 = 与赢家点数差 × 该值，默认 10",
+        "default": 10
+      },
+      "max_mute_seconds": {
+        "description": "单次最大禁言秒数",
+        "type": "int",
+        "hint": "防止爆牌分差过大，默认 600",
+        "default": 600
+      },
+      "max_players": {
+        "description": "单桌最大人数（含管理员）",
+        "type": "int",
+        "hint": "默认 6",
+        "default": 6
+      },
+      "round_timeout_seconds": {
+        "description": "每轮操作限时（秒）",
+        "type": "int",
+        "hint": "超时未操作视为停手，默认 60",
+        "default": 60
+      },
+      "waiting_timeout_seconds": {
+        "description": "等人未开局自动关房（秒）",
+        "type": "int",
+        "hint": "创建房间后若一直未 /开始21点，到时自动关闭，默认 600（10分钟）",
+        "default": 600
+      },
+      "joker_mode": {
+        "description": "启用小丑模式",
+        "type": "bool",
+        "hint": "启用后牌堆加入小王/大王。抽牌权重：普通牌=1，小丑=当前轮数（开局为0必不抽到）。小王拆其他人最小牌、大王拆最大牌并解除停牌；拆掉的牌进弃牌堆",
+        "default": false
+      }
+    }
+  },
+  "rollpig": {
+    "description": "今日小猪配置",
+    "type": "object",
+    "items": {
+      "at_view_pig": {
+        "description": "开启艾特他人查看今日小猪功能",
+        "hint": "是否允许通过艾特他人来查看对方的今日小猪，默认为关闭",
+        "type": "bool",
+        "default": false
+      },
+      "at_reply_user": {
+        "description": "回复时艾特用户",
+        "hint": "群聊中发送今日小猪时是否 @ 抽到小猪的用户；关闭后只发文案和图片，默认为开启",
+        "type": "bool",
+        "default": true
+      },
+      "wake_free_trigger": {
+        "description": "免唤醒词触发",
+        "hint": "开启后，发送以触发词开头或结尾的消息即可触发（不区分大小写），无需唤醒前缀（默认 /）或艾特机器人；触发词位于消息中间则不触发。触发词共 10 个：「今日小猪」「抽小猪」「我的小猪」「rollpig」「pig」「猪咪」「猪」「🐖」「🐷」「㊗️」，其中「今日小猪」为指令名，其余为别名。默认关闭，此时仍只能用唤醒前缀或艾特触发",
+        "type": "bool",
+        "default": false
+      }
+    }
+  },
+  "what_to_eat": {
+    "description": "吃什么与口味记忆配置",
+    "type": "object",
+    "items": {
+      "trigger_keywords": {
+        "description": "触发插件的关键词列表",
+        "type": "list",
+        "default": [
+          "吃什么"
+        ],
+        "items": {
+          "type": "string"
+        },
+        "hint": "配置多个关键词，如：吃什么、吃啥、吃点什么"
+      },
+      "require_mention": {
+        "description": "群聊仅在被@时才回复",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，群聊里只有 @机器人 并带关键词才会推荐/复读；闲聊说「吃什么」不再插话。私聊不受影响。"
+      },
+      "recommend_probability": {
+        "description": "推荐食物的概率 (0.0-1.0)",
+        "type": "float",
+        "default": 0.3,
+        "hint": "设为0.3表示30%概率推荐食物，70%概率复读"
+      },
+      "llm_enabled": {
+        "description": "启用 LLM 人设回复",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，推荐/附和文案会按人设由 LLM 生成；失败时自动回退固定模板。仍会阻断默认聊天 LLM，避免重复回复"
+      },
+      "llm_provider_id": {
+        "description": "LLM 提供商",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空则使用当前会话正在使用的聊天模型"
+      },
+      "llm_persona_id": {
+        "description": "插件指定人格",
+        "type": "string",
+        "default": "",
+        "_special": "select_persona",
+        "hint": "选择后强制用该人格口吻生成回复；留空则按下方开关继承会话/默认人格"
+      },
+      "llm_use_session_persona": {
+        "description": "未指定人格时继承会话人设",
+        "type": "bool",
+        "default": true,
+        "hint": "当「插件指定人格」为空时：优先会话人格 → 对话人格 → 全局默认人格"
+      },
+      "llm_also_for_echo": {
+        "description": "复读/附和也用人设 LLM",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后仅推荐食物时走 LLM，附和仍固定回复「是啊，吃什么」"
+      },
+      "response_delay_enabled": {
+        "description": "启用回复延迟（思考感）",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，回复前会随机等待一段时间，更像真人在想"
+      },
+      "response_delay_min_seconds": {
+        "description": "最小延迟秒数",
+        "type": "float",
+        "default": 0.8,
+        "hint": "回复延迟下限，建议 0.5~1.5"
+      },
+      "response_delay_max_seconds": {
+        "description": "最大延迟秒数",
+        "type": "float",
+        "default": 2.5,
+        "hint": "回复延迟上限，建议 1.5~3.0；最大不超过30"
+      },
+      "thinking_message_enabled": {
+        "description": "延迟期间发送「思考中」提示",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，推荐食物前会先发一句「让我想想...」再延迟出结果（可能多一条消息）"
+      },
+      "taste_memory_enabled": {
+        "description": "启用按人口味记忆",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后按用户 ID 记住喜好/忌口/过敏与历史推荐，选菜时避开忌口并降低最近重复；LLM 文案也会注入口味摘要"
+      },
+      "taste_learn_from_message": {
+        "description": "从聊天自动学习口味",
+        "type": "bool",
+        "default": true,
+        "hint": "识别「我喜欢…」「我不吃…」「对…过敏」以及「好吃/换一个」等反馈并写入档案"
+      },
+      "taste_avoid_recent_count": {
+        "description": "尽量避开最近推荐的条数",
+        "type": "int",
+        "default": 6,
+        "hint": "同一用户最近 N 道菜会大幅降权，减少连推同一道"
+      },
+      "taste_max_recent": {
+        "description": "每人保留的历史推荐条数",
+        "type": "int",
+        "default": 20,
+        "hint": "超出后丢弃更早记录"
+      },
+      "mcp_enabled": {
+        "description": "启用 HowToCook MCP 菜谱源",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后按概率从 HowToCook MCP（ModelScope looklookyou/How-To-Cook 或本地 howtocook-mcp）取菜；失败自动回退本地菜库。需先在 AstrBot「MCP」中添加并启用该服务"
+      },
+      "mcp_probability": {
+        "description": "推荐时使用 MCP 的概率 (0.0-1.0)",
+        "type": "float",
+        "default": 0.35,
+        "hint": "仅在 mcp_enabled=true 时生效。0.35 表示约 35% 走 MCP，其余用本地菜库"
+      },
+      "mcp_server_name": {
+        "description": "AstrBot MCP 服务名",
+        "type": "string",
+        "default": "cook",
+        "hint": "对应 data/mcp_server.json 里的键名，如 cook / howtocook-mcp。留空则自动扫描已连接服务中带 howtocook 工具的那一项"
+      },
+      "mcp_mode": {
+        "description": "MCP 推荐模式",
+        "type": "string",
+        "default": "random",
+        "hint": "random=全量菜谱真正随机（推荐）；category=按分类随机；what_to_eat=按人数出菜单再抽一道；auto=在 random/category 间切换。插件会自动避开最近推过的菜"
+      },
+      "mcp_people_count": {
+        "description": "用餐人数（what_to_eat 模式）",
+        "type": "int",
+        "default": 1,
+        "hint": "传给 mcp_howtocook_whatToEat 的 peopleCount，范围 1-10"
+      },
+      "mcp_categories": {
+        "description": "分类模式候选分类",
+        "type": "list",
+        "default": [
+          "荤菜",
+          "素菜",
+          "水产",
+          "早餐",
+          "主食",
+          "汤羹",
+          "甜品"
+        ],
+        "items": {
+          "type": "string"
+        },
+        "hint": "category / auto 模式会从这些分类中随机查询菜谱"
+      },
+      "mcp_timeout_seconds": {
+        "description": "MCP 调用超时（秒）",
+        "type": "float",
+        "default": 10.0,
+        "hint": "超时后自动回退本地菜库"
+      },
+      "mcp_remote_url": {
+        "description": "可选：远程 MCP 地址（SSE/HTTP）",
+        "type": "string",
+        "default": "",
+        "hint": "一般留空，使用 AstrBot 已配置的 MCP。若填写（如 ModelScope 托管 SSE URL），会在本地 MCP 不可用时尝试直连"
+      },
+      "mcp_remote_transport": {
+        "description": "远程 MCP 传输方式",
+        "type": "string",
+        "default": "sse",
+        "hint": "sse 或 streamable_http，仅在填写 mcp_remote_url 时生效"
+      },
+      "builtin_foods": {
+        "description": "内置食物列表（可编辑）",
+        "type": "list",
+        "default": [
+          "黄焖鸡米饭",
+          "麻辣烫",
+          "兰州拉面",
+          "沙县小吃",
+          "重庆小面",
+          "螺蛳粉",
+          "米线",
+          "炒饭",
+          "炒面",
+          "盖浇饭",
+          "水饺",
+          "馄饨",
+          "煎饼果子",
+          "肉夹馍",
+          "烤冷面",
+          "关东煮",
+          "冒菜",
+          "香锅",
+          "炸鸡",
+          "汉堡",
+          "披萨",
+          "寿司",
+          "便当",
+          "凉皮",
+          "凉面",
+          "热干面",
+          "酸辣粉",
+          "炸酱面",
+          "牛肉面",
+          "叉烧饭",
+          "烧腊饭",
+          "煲仔饭",
+          "石锅拌饭",
+          "部队锅",
+          "烤肉饭",
+          "猪脚饭",
+          "卤肉饭",
+          "烤鸭饭",
+          "口水鸡",
+          "酸菜鱼",
+          "水煮鱼",
+          "毛血旺",
+          "干锅",
+          "烤鱼",
+          "烧烤",
+          "奶茶+面包",
+          "便利店",
+          "泡面",
+          "食堂自选",
+          "轻食沙拉",
+          "刀削面",
+          "油泼面",
+          "担担面",
+          "阳春面",
+          "海鲜面",
+          "番茄鸡蛋面",
+          "豚骨拉面",
+          "乌冬面",
+          "意面",
+          "炒河粉",
+          "肠粉",
+          "过桥米线",
+          "桂林米粉",
+          "老友粉",
+          "螺蛳粉+炸蛋",
+          "火鸡面",
+          "拌面",
+          "葱油拌面",
+          "烩面",
+          "羊肉泡馍",
+          "鱼香肉丝盖饭",
+          "宫保鸡丁盖饭",
+          "番茄炒蛋盖饭",
+          "回锅肉盖饭",
+          "土豆牛肉盖饭",
+          "咖喱饭",
+          "黑椒牛柳饭",
+          "照烧鸡排饭",
+          "鳗鱼饭",
+          "肥牛饭",
+          "鸡公煲",
+          "木桶饭",
+          "铁板烧",
+          "牛排饭",
+          "鸡腿饭",
+          "蛋包饭",
+          "沙拉碗",
+          "越南粉",
+          "泰式炒河粉",
+          "韩式拌饭",
+          "火锅",
+          "串串香",
+          "麻辣香锅",
+          "番茄火锅",
+          "椰子鸡",
+          "牛肉火锅",
+          "鱼头泡饭",
+          "酸汤肥牛",
+          "水煮肉片",
+          "肥肠粉",
+          "炸串",
+          "臭豆腐",
+          "烤红薯",
+          "烤面筋",
+          "铁板豆腐",
+          "鸡蛋灌饼",
+          "手抓饼",
+          "生煎包",
+          "小笼包",
+          "锅贴",
+          "烧麦",
+          "葱油饼",
+          "韭菜盒子",
+          "豆皮",
+          "烤包子",
+          "炸鸡排",
+          "鸡米花",
+          "薯条+可乐",
+          "章鱼小丸子",
+          "鱼豆腐串",
+          "包子豆浆",
+          "油条豆腐脑",
+          "胡辣汤+油饼",
+          "肠粉+皮蛋瘦肉粥",
+          "三明治",
+          "饭团",
+          "紫菜包饭",
+          "燕麦碗",
+          "酸奶水果杯",
+          "全麦吐司",
+          "红烧肉",
+          "糖醋里脊",
+          "可乐鸡翅",
+          "麻婆豆腐",
+          "鱼香茄子",
+          "地三鲜",
+          "蒜蓉西兰花",
+          "青椒肉丝",
+          "土豆炖牛腩",
+          "排骨汤泡饭",
+          "扬州炒饭",
+          "虾仁滑蛋饭",
+          "蒜香排骨",
+          "啤酒鸭",
+          "椒盐虾",
+          "干煸豆角",
+          "酸辣土豆丝",
+          "西红柿鸡蛋汤+饼",
+          "小龙虾",
+          "炸鸡啤酒",
+          "烤生蚝",
+          "海鲜粥",
+          "鸭血粉丝汤",
+          "麻辣拌",
+          "凉菜拼盘",
+          "炸物拼盘",
+          "芝士焗饭",
+          "奶油蘑菇意面",
+          "日式定食",
+          "寿司拼盘",
+          "刺身",
+          "韩式炸鸡",
+          "部队火锅",
+          "芝士排骨",
+          "泰式冬阴功",
+          "咖喱牛腩",
+          "新加坡炒面",
+          "马来拉茶+椰浆饭",
+          "外卖盲盒",
+          "速冻水饺",
+          "自热火锅",
+          "自热米饭",
+          "罐头+米饭",
+          "面包牛奶",
+          "水果餐",
+          "减脂鸡胸餐",
+          "牛肉汉堡套餐",
+          "肯德基随心选",
+          "麦当劳随心选",
+          "必胜客小食拼盘"
+        ],
+        "items": {
+          "type": "string"
+        },
+        "hint": "默认约 180 道常见美食，可自由增删改"
+      },
+      "custom_foods": {
+        "description": "额外的自定义食物列表",
+        "type": "list",
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "hint": "添加额外的食物，会与上方列表合并"
+      },
+      "rate_limit_enabled": {
+        "description": "启用频率限制（防止多Bot循环）",
+        "type": "bool",
+        "default": true,
+        "hint": "启用后，在1分钟内超过最大响应次数会强制推荐食物"
+      },
+      "rate_limit_max": {
+        "description": "最大响应次数",
+        "type": "int",
+        "default": 3,
+        "hint": "超过此次数后，将100%推荐食物而非复读"
+      },
+      "rate_limit_window_seconds": {
+        "description": "频率限制时间窗口（秒）",
+        "type": "int",
+        "default": 60,
+        "hint": "与上方最大响应次数配合使用，默认60秒（1分钟）"
+      },
+      "echo_cooldown_enabled": {
+        "description": "启用复读冷却（复读后的一段时间内强制推荐食物）",
+        "type": "bool",
+        "default": true,
+        "hint": "启用后，复读后的冷却时间内不会再复读，而是强制推荐食物"
+      },
+      "echo_cooldown_seconds": {
+        "description": "复读后的冷却时间（秒）",
+        "type": "int",
+        "default": 15,
+        "hint": "复读后，在此时间内再次触发将强制推荐食物"
+      },
+      "uploaded_images": {
+        "description": "上传的食物图片（在下方上传图片，文件名包含食物名即可自动绑定）",
+        "type": "file",
+        "default": [],
+        "file_types": [
+          ".jpg",
+          ".jpeg",
+          ".png",
+          ".gif",
+          ".webp",
+          ".bmp"
+        ],
+        "hint": "上传图片，建议命名为：食物名.jpg、食物名_1.jpg 等格式"
+      }
+    }
+  }
+}

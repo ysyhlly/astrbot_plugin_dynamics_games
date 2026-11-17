@@ -1,0 +1,20 @@
+name: astrbot_plugin_dynamics_games
+display_name: 群间游戏 · Dynamics Games
+desc: 群间（Chat Dynamics）系列协作与娱乐集成插件：围绕「一起完成一件事」组织共读、游戏约局、接龙创作、小型挑战与共同制作作品，负责报名、阶段、进度与成果，联动群间记忆保存经历、群史记收录有价值的结果，并完整整合真心话、21点、今日小猪与吃什么四大群聊娱乐引擎。
+version: v0.1.1-rc.1
+author: ysyhlly
+astrbot_version: ">=4.29.4,<5"
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - qq_official_webhook
+  - discord
+  - telegram
+  - weixin_oc
+tags:
+  - chat-dynamics
+  - games
+  - collaboration
+  - community
+
+repo: https://github.com/ysyhlly/astrbot_plugin_dynamics_games

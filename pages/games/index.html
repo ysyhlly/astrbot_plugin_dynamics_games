@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script src="theme.js?v=0.1.0"></script>
+  <title data-series-text="群间游戏 · 一起完成一件事">群间游戏 · 一起完成一件事</title>
+  <link rel="stylesheet" href="style.css?v=round2.1">
+  <link rel="stylesheet" href="./series-ui.css?v=round2.1">
+  <script type="module" src="./series-panels.js?v=round2.1"></script>
+</head>
+<body>
+  <a class="skip-link" href="#workspace" data-series-text="跳到工作区">跳到工作区</a>
+  <div class="app-shell series-workspace">
+    <header class="series-nav">
+      <a class="series-brand" href="#workspace"><span class="series-mark" aria-hidden="true">DG</span><span data-series-text="群间游戏">群间游戏</span></a>
+      <nav class="side-nav series-tabs" aria-label="内容分类" data-series-aria-label="内容分类">
+        <button data-tab="home" class="selected"><span class="nav-icon" aria-hidden="true">▦</span><span data-series-text="运行总览">运行总览</span></button>
+        <button data-tab="activities"><span class="nav-icon" aria-hidden="true">◎</span><span data-series-text="一起完成一件事">一起完成一件事</span></button>
+        <button data-tab="outcomes"><span class="nav-icon" aria-hidden="true">✦</span><span data-series-text="成果与归档">成果与归档</span></button>
+        <button data-tab="engines"><span class="nav-icon" aria-hidden="true">❖</span><span data-series-text="娱乐引擎总控">娱乐引擎总控</span></button>
+      </nav>
+      <div class="series-nav-tools">
+        <button id="theme-toggle" type="button" aria-pressed="false">
+          <span id="theme-label" data-series-text="日间模式">日间模式</span>
+          <span class="theme-switch" aria-hidden="true"></span>
+        </button>
+      </div>
+    </header>
+
+    <div class="workspace-shell">
+      <main id="workspace" tabindex="-1">
+        <header class="topbar series-heading">
+          <div>
+            <span class="eyebrow">CHAT DYNAMICS / GAMES</span>
+            <h1 data-series-text="群间游戏 · 一起完成一件事">群间游戏 · 一起完成一件事</h1>
+            <p data-series-text="组织共读、游戏约局、接龙创作、小型挑战、共同制作作品 —— 负责报名、阶段、进度与成果。">组织共读、游戏约局、接龙创作、小型挑战、共同制作作品 —— 负责报名、阶段、进度与成果。</p>
+          </div>
+          <div class="topbar-tools">
+            <label class="scope-picker-wrap">
+              <span class="sr-only" data-series-text="筛选群聊会话">筛选群聊会话</span>
+              <select id="global-umo" aria-label="筛选群聊会话" data-series-aria-label="筛选群聊会话">
+                <option value="" data-series-text="全部群聊会话">全部群聊会话</option>
+              </select>
+            </label>
+            <button id="refresh-btn" type="button" data-series-text="刷新数据">刷新数据</button>
+          </div>
+        </header>
+
+        <section id="dynamics-series-panel" aria-label="互通插件状态" data-series-aria-label="互通插件状态">
+          <p class="sp-feedback" role="status" data-series-text="正在读取互通插件…">正在读取互通插件…</p>
+        </section>
+
+        <div id="notice" role="status" aria-live="polite" data-series-text="正在连接群间游戏控制台…">正在连接群间游戏控制台…</div>
+
+        <section class="stats" id="stats-bar" aria-label="群间游戏概览" data-series-aria-label="群间游戏概览"></section>
+
+        <!-- Tab 1: 运行总览 -->
+        <section id="tab-home">
+          <div class="grid-two">
+            <article class="card">
+              <div class="card-top">
+                <h3 data-series-text="三层协作归属契约">三层协作归属契约</h3>
+                <span class="badge" data-series-text="职责分明 · 零重复入库">职责分明 · 零重复入库</span>
+              </div>
+              <div id="ownership-list" class="ownership-stack"></div>
+            </article>
+            <article class="card">
+              <div class="card-top">
+                <h3 data-series-text="生态桥接与接管状态">生态桥接与接管状态</h3>
+                <span id="legacy-status-badge" class="badge" data-series-text="检查中">检查中</span>
+              </div>
+              <div id="bridge-health" class="ownership-stack"></div>
+            </article>
+          </div>
+
+          <article class="card">
+            <div class="card-top">
+              <div>
+                <h3 data-series-text="五大协作模式速览">五大协作模式速览</h3>
+                <p class="muted" data-series-text="群内可用 /活动 发起 ...，也可使用 /共读、/约局、/接龙 或 /挑战。">群内可用 /活动 发起 ...，也可使用 /共读、/约局、/接龙 或 /挑战。</p>
+              </div>
+              <button id="goto-create-btn" type="button" class="primary" data-series-text="+ 发起新协作">+ 发起新协作</button>
+            </div>
+            <div id="category-cards" class="category-grid"></div>
+          </article>
+
+          <article class="card">
+            <div class="card-top">
+              <h3 data-series-text="正在进行的协作活动">正在进行的协作活动</h3>
+              <button id="goto-activities-btn" type="button" data-series-text="查看全部活动">查看全部活动</button>
+            </div>
+            <div id="home-open-list"></div>
+          </article>
+        </section>
+
+        <!-- Tab 2: 一起完成一件事 -->
+        <section id="tab-activities" hidden>
+          <div class="toolbar">
+            <div>
+              <h2 data-series-text="一起完成一件事">一起完成一件事</h2>
+              <p class="muted" data-series-text="统一追踪报名名册、阶段流水线、成员贡献与完结定稿；中途取消或流局的活动绝不写入群史记。">统一追踪报名名册、阶段流水线、成员贡献与完结定稿；中途取消或流局的活动绝不写入群史记。</p>
+            </div>
+            <button id="open-create-dialog" type="button" class="primary" data-series-text="+ 发起协作活动">+ 发起协作活动</button>
+          </div>
+
+          <div class="console-controls">
+            <select id="act-category-filter" aria-label="按协作类型筛选" data-series-aria-label="按协作类型筛选">
+              <option value="" data-series-text="全部协作类型">全部协作类型</option>
+              <option value="reading" data-series-text="组织共读">组织共读</option>
+              <option value="matchmaking" data-series-text="游戏约局">游戏约局</option>
+              <option value="relay" data-series-text="接龙创作">接龙创作</option>
+              <option value="challenge" data-series-text="小型挑战">小型挑战</option>
+              <option value="creation" data-series-text="共同制作作品">共同制作作品</option>
+            </select>
+            <select id="act-status-filter" aria-label="按状态筛选" data-series-aria-label="按状态筛选">
+              <option value="open" data-series-text="进行中 / 招募中">进行中 / 招募中</option>
+              <option value="" data-series-text="全部状态">全部状态</option>
+              <option value="completed" data-series-text="已完结">已完结</option>
+              <option value="cancelled" data-series-text="已取消 / 流局">已取消 / 流局</option>
+            </select>
+            <label class="inline-check">
+              <input type="checkbox" id="act-include-mini">
+              <span data-series-text="显示小游戏完赛记录">显示小游戏完赛记录</span>
+            </label>
+          </div>
+
+          <div class="split-workbench">
+            <div>
+              <div id="activity-list" class="list-pane" aria-label="活动列表" data-series-aria-label="活动列表"></div>
+              <div id="activity-pagination" class="actions-row" hidden></div>
+            </div>
+            <aside id="activity-detail" class="detail-pane card" aria-label="活动详情" data-series-aria-label="活动详情">
+              <div class="empty" data-series-text="从左侧选择一项协作活动，查看报名成员、当前阶段、打卡/接龙时间线并执行阶段推进。">从左侧选择一项协作活动，查看报名成员、当前阶段、打卡/接龙时间线并执行阶段推进。</div>
+            </aside>
+          </div>
+        </section>
+
+        <!-- Tab 3: 成果与归档 -->
+        <section id="tab-outcomes" hidden>
+          <div class="toolbar">
+            <div>
+              <h2 data-series-text="成果与归档">成果与归档</h2>
+              <p class="muted" data-series-text="展示已完结活动的汇编成果稿，核验「群间记忆」经历存档与「群史记」入史回执。">展示已完结活动的汇编成果稿，核验「群间记忆」经历存档与「群史记」入史回执。</p>
+            </div>
+          </div>
+          <div class="split-workbench">
+            <div>
+              <div id="outcome-list" class="list-pane" aria-label="成果列表" data-series-aria-label="成果列表"></div>
+              <div id="outcome-pagination" class="actions-row" hidden></div>
+            </div>
+            <aside id="outcome-detail" class="detail-pane card" aria-label="成果阅读器" data-series-aria-label="成果阅读器">
+              <div class="empty" data-series-text="选择左侧任意已完结成果，阅读完整汇编文稿或手动重同步至群间记忆 / 群史记。">选择左侧任意已完结成果，阅读完整汇编文稿或手动重同步至群间记忆 / 群史记。</div>
+            </aside>
+          </div>
+        </section>
+
+        <!-- Tab 4: 娱乐引擎总控 -->
+        <section id="tab-engines" hidden>
+          <div class="toolbar">
+            <div>
+              <h2 data-series-text="群聊娱乐引擎总控">群聊娱乐引擎总控</h2>
+              <p class="muted" data-series-text="四大群聊娱乐插件已内聚至「群间游戏」，100% 保留原有群指令与历史数据目录，支持按需独立启停。">四大群聊娱乐插件已内聚至「群间游戏」，100% 保留原有群指令与历史数据目录，支持按需独立启停。</p>
+            </div>
+          </div>
+          <div id="engine-grid" class="engine-grid"></div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- 新建协作活动弹窗 -->
+  <dialog id="create-dialog" aria-labelledby="create-dialog-title" aria-describedby="create-dialog-description">
+    <form id="create-form" method="dialog">
+      <div class="create-fields">
+        <h2 id="create-dialog-title" data-series-text="发起「一起完成一件事」">发起「一起完成一件事」</h2>
+        <p id="create-dialog-description" class="muted" data-series-text="成员可通过 /活动 报名 加入，通过 /活动 打卡 或 /活动 接棒 推进。">成员可通过 /活动 报名 加入，通过 /活动 打卡 或 /活动 接棒 推进。</p>
+        <label><span data-series-text="目标群会话 UMO（必填，格式为平台:GroupMessage:群号）">目标群会话 UMO（必填，格式为平台:GroupMessage:群号）</span>
+          <input id="create-umo" type="text" list="known-umo-list" placeholder="例如 aiocqhttp:GroupMessage:123456789" required data-series-placeholder="例如 aiocqhttp:GroupMessage:123456789">
+          <datalist id="known-umo-list"></datalist>
+        </label>
+        <div class="form-row">
+          <label><span data-series-text="协作类型">协作类型</span>
+            <select id="create-category">
+              <option value="reading" data-series-text="组织共读">组织共读</option>
+              <option value="matchmaking" data-series-text="游戏约局">游戏约局</option>
+              <option value="relay" data-series-text="接龙创作">接龙创作</option>
+              <option value="challenge" data-series-text="小型挑战">小型挑战</option>
+              <option value="creation" data-series-text="共同制作作品">共同制作作品</option>
+            </select>
+          </label>
+          <label><span data-series-text="目标打卡/接龙/段落数">目标打卡/接龙/段落数</span>
+            <input id="create-target" type="number" min="1" max="500" value="5" required>
+          </label>
+          <label><span data-series-text="最低成团人数">最低成团人数</span>
+            <input id="create-min-p" type="number" min="1" max="100" value="2" required>
+          </label>
+        </div>
+        <label><span data-series-text="活动标题">活动标题</span>
+          <input id="create-title" type="text" maxlength="120" placeholder="例如：《银河铁道之夜》周末共读 / 周五晚21点车队 / 夏夜怪谈接龙" required data-series-placeholder="例如：《银河铁道之夜》周末共读 / 周五晚21点车队 / 夏夜怪谈接龙">
+        </label>
+        <label><span data-series-text="自定义阶段（可选，用 &gt; 分隔，留空使用默认阶段）">自定义阶段（可选，用 &gt; 分隔，留空使用默认阶段）</span>
+          <input id="create-stages" type="text" maxlength="240" placeholder="留空自动采用默认四阶段流水线" data-series-placeholder="留空自动采用默认四阶段流水线">
+        </label>
+        <label><span data-series-text="活动简介与规则说明（可选）">活动简介与规则说明（可选）</span>
+          <textarea id="create-desc" rows="3" maxlength="800" placeholder="说明本次共读章节、约局时间、接龙规则或共创分工…" data-series-placeholder="说明本次共读章节、约局时间、接龙规则或共创分工…"></textarea>
+        </label>
+      </div>
+      <footer>
+        <p id="create-error" class="dialog-error" role="alert"></p>
+        <button type="button" id="create-cancel-btn" data-series-text="取消">取消</button>
+        <button type="submit" id="create-submit-btn" class="primary" data-series-text="立即创建活动">立即创建活动</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- 完结/取消确认弹窗 -->
+  <dialog id="action-dialog" aria-labelledby="action-dialog-title" aria-describedby="action-dialog-desc">
+    <form id="action-form" method="dialog">
+      <h2 id="action-dialog-title" data-series-text="完结活动">完结活动</h2>
+      <p id="action-dialog-desc" class="muted"></p>
+      <label id="action-note-label"><span data-series-text="结项寄语 / 备注说明">结项寄语 / 备注说明</span>
+        <textarea id="action-note" rows="3" maxlength="600" placeholder="填写结项总结或取消原因…" data-series-placeholder="填写结项总结或取消原因…"></textarea>
+      </label>
+      <footer>
+        <button type="button" id="action-cancel-btn" data-series-text="返回">返回</button>
+        <button type="submit" id="action-confirm-btn" class="primary" data-series-text="确认执行">确认执行</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <script type="module" src="app.js?v=round2.1"></script>
+</body>
+</html>
