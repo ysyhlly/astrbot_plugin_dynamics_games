@@ -1,6 +1,6 @@
 # 群间游戏 · Dynamics Games (`astrbot_plugin_dynamics_games`)
 
-> 发布候选：`v0.1.1-rc.3`。升级说明与验证边界见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+> 发布候选：`v0.1.1-rc.4`。升级说明与验证边界见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
 > **一起完成一件事** —— 组织共读、游戏约局、接龙创作、小型挑战、共同制作作品。
 

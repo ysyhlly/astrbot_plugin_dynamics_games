@@ -88,7 +88,7 @@ function fmtTime(ts) {
 }
 
 async function apiGet(path, params = {}) {
-  const bridge = window.AstrBotPluginPage || window.AstrBotPluginView;
+  const bridge = (window.DynamicsPanelBridge || window.AstrBotPluginPage || window.AstrBotPluginView);
   if (!bridge) throw new Error('请从 AstrBot 管理面板打开群间游戏控制台。');
   if (bridge.ready) await bridge.ready();
   const clean = {};
@@ -103,7 +103,7 @@ async function apiGet(path, params = {}) {
 }
 
 async function apiPost(path, body = {}, valid = () => true) {
-  const bridge = window.AstrBotPluginPage || window.AstrBotPluginView;
+  const bridge = (window.DynamicsPanelBridge || window.AstrBotPluginPage || window.AstrBotPluginView);
   if (!bridge) throw new Error('请从 AstrBot 管理面板打开群间游戏控制台。');
   if (bridge.ready) await bridge.ready();
   if (!valid()) return;
@@ -682,7 +682,7 @@ function renderEngines() {
       const subBtn = el('button', 'primary', '打开今日老婆好感度与关系图');
       subBtn.type = 'button';
       subBtn.onclick = async () => {
-        const bridge = window.AstrBotPluginPage || window.AstrBotPluginView;
+        const bridge = (window.DynamicsPanelBridge || window.AstrBotPluginPage || window.AstrBotPluginView);
         if (typeof bridge?.navigateToPlugin === 'function') {
           await bridge.navigateToPlugin('astrbot_plugin_dynamics_games', eng.subpage, document.documentElement.dataset.uiTheme);
         } else {

@@ -74,6 +74,8 @@ class GamesWebConsole:
         return handler
 
     def register(self) -> None:
+        from ..series_workspace import register_panel_api
+
         endpoints = (
             ("overview", self.overview, ["GET"], "群间游戏总览"),
             ("activities", self.activities, ["GET"], "群间游戏活动列表"),
@@ -93,7 +95,7 @@ class GamesWebConsole:
         for name, fn, methods, desc in endpoints:
             wrapped = self._wrap(fn)
             route = f"/{PLUGIN_ID}/{name}"
-            self.plugin.context.register_web_api(route, wrapped, methods, desc)
+            register_panel_api(self.plugin, self.plugin.context.register_web_api, route, wrapped, methods, desc)
             self._routes.append((route, wrapped, methods, desc))
 
     def close(self) -> None:
