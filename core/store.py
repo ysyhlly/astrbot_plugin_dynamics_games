@@ -12,8 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from .models import (
-    CATEGORIES, STATUS_LABELS, build_artifact_markdown,
-    evaluate_outcome_worthiness, parse_stages,
+    CATEGORIES,
+    STATUS_LABELS,
+    build_artifact_markdown,
+    evaluate_outcome_worthiness,
+    parse_stages,
 )
 
 

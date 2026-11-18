@@ -42,8 +42,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any
 from uuid import uuid4
 
 from astrbot.api import logger
@@ -88,10 +89,10 @@ class Room:
     #: hook inside the locked advance; the command layer reads it AFTER
     #: ``next()``/``skip()`` returns to build the ``@asker 问 @askee`` announce.
     #: ``None`` until the first advance.
-    last_pair: Optional[tuple[str, str]] = None
+    last_pair: tuple[str, str] | None = None
     #: Player asked in the most recent advance — the lottery's ``prev_askee``
     #: input, so the same player is not asked twice in a row.
-    last_askee_id: Optional[str] = None
+    last_askee_id: str | None = None
     #: ``unified_msg_origin`` captured at create (session scoping for the
     #: LLM/LM calls in T10's flow hook). Empty until ``cmd_create`` stores it;
     #: the flow falls back to ``"group:{group_id}"`` when absent.
@@ -117,7 +118,7 @@ class RoomManager:
     - ``_waiting_check_interval`` (1.0) — internal knob, tests shorten it
     """
 
-    def __init__(self, config: Optional[dict] = None) -> None:
+    def __init__(self, config: dict | None = None) -> None:
         self._config: dict = dict(config or {})
         # Public alias for command layer / main (complete_and_announce max_questions).
         self.config: dict = self._config
@@ -125,23 +126,23 @@ class RoomManager:
         self._waiting_tasks: dict[str, asyncio.Task] = {}
         self._idle_tasks: dict[str, asyncio.Task] = {}
         self._choice_tasks: dict[str, asyncio.Task] = {}
-        self.outcome_callback: Optional[Callable[[dict], Awaitable[None]]] = None
+        self.outcome_callback: Callable[[dict], Awaitable[None]] | None = None
         self._pending_outcomes: dict[str, dict] = {}
         self._outcome_lock = asyncio.Lock()
         #: Settable question-generation injection point (T10 replaces it).
         #: Signature: ``async (room, manager) -> str``.
-        self.advance_hook: Callable[[Room, "RoomManager"], Awaitable[str]] = (
+        self.advance_hook: Callable[[Room, RoomManager], Awaitable[str]] = (
             self._advance_impl
         )
         #: Internal test seam: the round-idle timer calls this (if set) after
         #: capturing ``advance_count`` and BEFORE acquiring the lock. Tests use
         #: it to deterministically interleave the idle timer with a human
         #: advance (Event gates, not sleeps). Not part of the public API.
-        self._idle_wake_hook: Optional[Callable[[], Awaitable[None]]] = None
+        self._idle_wake_hook: Callable[[], Awaitable[None]] | None = None
         #: Internal test seam for the choice timer (same pattern as idle).
         #: Called after sleep + capture of ``(advance_count, round_stage)`` and
         #: BEFORE acquiring the lock.
-        self._choice_wake_hook: Optional[Callable[[], Awaitable[None]]] = None
+        self._choice_wake_hook: Callable[[], Awaitable[None]] | None = None
 
     # ------------------------------------------------------------------ config
     def _cfg_int(self, key: str, default: int) -> int:
@@ -240,7 +241,7 @@ class RoomManager:
         room.last_action_at = time.time()
         return (True, "")
 
-    def status(self, group_id: str) -> Optional[dict]:
+    def status(self, group_id: str) -> dict | None:
         """Synchronous snapshot for display (no lock; torn reads acceptable)."""
         room = self.rooms.get(group_id)
         if room is None:
@@ -330,7 +331,7 @@ class RoomManager:
             and not is_admin
         ):
             return (False, "只有参与玩家、房主或管理员可以推进下一题。")
-        cancelled_choice: Optional[asyncio.Task] = None
+        cancelled_choice: asyncio.Task | None = None
         async with room._lock:
             # identity recheck after lock.acquire() (an await point)
             if self.rooms.get(group_id) is not room:
@@ -562,7 +563,7 @@ class RoomManager:
         self.rooms.clear()
 
     # ------------------------------------------------------------ advance hook
-    async def _advance_impl(self, room: Room, manager: "RoomManager") -> str:
+    async def _advance_impl(self, room: Room, manager: RoomManager) -> str:
         """Default advance stub: returns a placeholder question.
 
         T10 replaces ``manager.advance_hook`` with the real question generator.
@@ -622,7 +623,7 @@ class RoomManager:
 
     async def choose_asker_mode(
         self, group_id: str, caller_id: str, mode: str
-    ) -> tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """Human asker picks self-question vs bot-question. LOCKED.
 
         * ``mode="self"`` → ``round_stage="awaiting_asker_question"``, re-arm
@@ -636,8 +637,8 @@ class RoomManager:
         room = self.rooms.get(group_id)
         if room is None:
             return (False, "房间状态已变化")
-        cancelled_choice: Optional[asyncio.Task] = None
-        result: tuple[bool, Optional[str]] = (False, "状态已变化")
+        cancelled_choice: asyncio.Task | None = None
+        result: tuple[bool, str | None] = (False, "状态已变化")
         async with room._lock:
             if self.rooms.get(group_id) is not room:
                 return (False, "房间状态已变化")
@@ -671,7 +672,7 @@ class RoomManager:
 
     async def submit_question(
         self, group_id: str, caller_id: str, text: str
-    ) -> tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """Asker submits a self-written question. LOCKED.
 
         Requires ``round_stage == "awaiting_asker_question"`` and caller ==
@@ -685,8 +686,8 @@ class RoomManager:
         stripped = str(text).strip() if text is not None else ""
         if not stripped:
             return (False, "题目不能为空，请重新发送。")
-        cancelled_choice: Optional[asyncio.Task] = None
-        result: tuple[bool, Optional[str]] = (False, "状态已变化")
+        cancelled_choice: asyncio.Task | None = None
+        result: tuple[bool, str | None] = (False, "状态已变化")
         async with room._lock:
             if self.rooms.get(group_id) is not room:
                 return (False, "房间状态已变化")
@@ -718,7 +719,7 @@ class RoomManager:
         Returns ``(True, question_text)`` or ``(False, reason)``.
         """
         room.advance_count += 1
-        text: Optional[str] = None
+        text: str | None = None
         try:
             text = await self.advance_hook(room, self)
         except asyncio.CancelledError:
@@ -760,7 +761,7 @@ class RoomManager:
 
     def _cancel_task(
         self, tasks: dict[str, asyncio.Task], group_id: str
-    ) -> Optional[asyncio.Task]:
+    ) -> asyncio.Task | None:
         """Pop and cancel a timer task; return the cancelled task (or None).
 
         A timer cancelling itself only detaches from the map — cancelling the
@@ -783,7 +784,7 @@ class RoomManager:
     def _cancel_idle_timer(self, group_id: str) -> None:
         self._cancel_task(self._idle_tasks, group_id)
 
-    def _cancel_choice_timer(self, group_id: str) -> Optional[asyncio.Task]:
+    def _cancel_choice_timer(self, group_id: str) -> asyncio.Task | None:
         return self._cancel_task(self._choice_tasks, group_id)
 
     def _cancel_room_timers(self, group_id: str) -> list[asyncio.Task]:

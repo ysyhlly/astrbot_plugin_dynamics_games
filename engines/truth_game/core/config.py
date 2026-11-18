@@ -11,7 +11,7 @@ to satisfy the plugin invariants.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any
 
 TRUE_STRINGS = {"1", "true", "yes", "on"}
 
@@ -103,7 +103,7 @@ class Config:
         self.max_questions_per_game = _as_int(self.max_questions_per_game, 30)
 
     @classmethod
-    def from_dict(cls, raw: Dict[str, Any] | None) -> "Config":
+    def from_dict(cls, raw: dict[str, Any] | None) -> Config:
         """Build a Config from an AstrBot config dict (unknown keys ignored)."""
         if not raw:
             return cls()

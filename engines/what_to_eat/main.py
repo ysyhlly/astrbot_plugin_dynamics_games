@@ -1,7 +1,6 @@
 """吃什么推荐插件主文件。"""
 
 from __future__ import annotations
-from ...runtime import Component
 
 import asyncio
 import os
@@ -13,6 +12,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import At, AtAll
 from astrbot.api.star import Context
 
+from ...runtime import Component
 from .food_api import FoodApiClient
 from .food_data import FoodDataManager
 from .image_manager import ImageManager

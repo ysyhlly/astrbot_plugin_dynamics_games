@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import random
 from pathlib import Path
-from typing import List, Optional, Set
 
 #: Valid ``load_bank`` kinds. Kept as a tuple so callers can validate input.
 BANK_KINDS: tuple = ("safe", "unsafe")
@@ -23,7 +22,7 @@ BANK_KINDS: tuple = ("safe", "unsafe")
 BANKS_DIR: Path = Path(__file__).resolve().parent.parent / "data" / "banks"
 
 
-def load_bank(kind: str) -> List[str]:
+def load_bank(kind: str) -> list[str]:
     """Load the question bank for ``kind`` as a list of strings.
 
     - ``kind`` must be ``"safe"`` or ``"unsafe"``; anything else -> ``[]``.
@@ -47,10 +46,10 @@ def load_bank(kind: str) -> List[str]:
 
 
 def pick_unused(
-    bank: List[str],
-    used_indexes: Set[int],
+    bank: list[str],
+    used_indexes: set[int],
     rng: random.Random,
-) -> Optional[str]:
+) -> str | None:
     """Pick a random question whose index is not in ``used_indexes``.
 
     - When every index of the bank has been used, resets ``used_indexes`` and

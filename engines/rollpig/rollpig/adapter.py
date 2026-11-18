@@ -12,9 +12,9 @@ from pathlib import Path
 import astrbot.api.message_components as Comp
 from astrbot.api.event import AstrMessageEvent
 
-from .log_types import DiagnosticLogger
 from . import messages
 from .config import PluginSettings
+from .log_types import DiagnosticLogger
 from .models import Pig
 
 

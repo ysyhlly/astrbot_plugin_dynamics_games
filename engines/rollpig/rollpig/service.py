@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Callable, Sequence
 from datetime import date
-from typing import Callable, Sequence
 
 from .models import Pig
 from .repository import PigRepository

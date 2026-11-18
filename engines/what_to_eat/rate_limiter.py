@@ -10,7 +10,7 @@ from astrbot.api import logger
 class RateLimiter:
     """
     频率限制器，按群组记录响应次数，防止多Bot循环触发。
-    
+
     在指定时间窗口内，超过最大响应次数后，会强制推荐食物（而非复读）。
     同时支持复读冷却功能，复读后的一段时间内强制推荐食物。
     """
@@ -57,7 +57,7 @@ class RateLimiter:
             (can_respond: bool, force_recommend: bool) 元组
             - can_respond: 始终为 True（此插件始终响应）
             - force_recommend: 是否强制推荐食物（超出限制）
-        
+
         注意:
             此方法仅决定是否强制推荐食物，而不是是否阻止响应。
         """
@@ -198,7 +198,7 @@ class RateLimiter:
     def check_and_record(self, group_id: str) -> tuple[bool, bool]:
         """
         原子性地检查频率限制并记录响应。
-        
+
         此方法结合 can_respond() 和 record_response() 以避免
         多线程/多协程环境中的竞态条件。
 

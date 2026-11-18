@@ -15,13 +15,12 @@
 from __future__ import annotations
 
 import random
-from typing import Dict, List, Optional, Tuple, Union
 
 #: 机器人提问者哨兵 ID。永不作为被提问者返回。
 BOT_ASKER_ID = "__bot__"
 
 #: 玩家输入：dict 为 ``{user_id: 昵称}``，list 为 ``[user_id, ...]``。
-PlayersInput = Union[Dict[str, str], List[str]]
+PlayersInput = dict[str, str] | list[str]
 
 
 class Lottery:
@@ -41,27 +40,27 @@ class Lottery:
     def __init__(
         self,
         players: PlayersInput,
-        ask_counts: Optional[Dict[str, int]] = None,
+        ask_counts: dict[str, int] | None = None,
         bot_ask_enabled: bool = True,
         bot_ask_frequency: float = 0.5,
-        rng: Optional[random.Random] = None,
+        rng: random.Random | None = None,
     ) -> None:
         if isinstance(players, dict):
             # dict 的键是 user_id，值是昵称；抽取只关心 user_id。
-            self.player_ids: List[str] = list(players.keys())
-            self.nicknames: Dict[str, str] = dict(players)
+            self.player_ids: list[str] = list(players.keys())
+            self.nicknames: dict[str, str] = dict(players)
         else:
             self.player_ids = list(players)
             self.nicknames = {}
         # 复制外部数据（浅拷贝），绝不对调用方的房间状态做任何修改。
-        self.ask_counts: Dict[str, int] = dict(ask_counts or {})
+        self.ask_counts: dict[str, int] = dict(ask_counts or {})
         self.bot_ask_enabled = bool(bot_ask_enabled)
         # 概率裁剪到 [0.0, 1.0]，防御异常配置。
         freq = float(bot_ask_frequency)
         self.bot_ask_frequency = min(1.0, max(0.0, freq))
         self.rng = rng if rng is not None else random.Random()
 
-    def pick_pair(self, prev_askee_id: Optional[str] = None) -> Tuple[str, str]:
+    def pick_pair(self, prev_askee_id: str | None = None) -> tuple[str, str]:
         """抽取一轮 ``(提问者, 被提问者)``。
 
         Args:
@@ -107,7 +106,7 @@ class Lottery:
         asker = self.rng.choice(askers)
         return (asker, askee)
 
-    def _weighted_pick(self, candidates: List[str]) -> str:
+    def _weighted_pick(self, candidates: list[str]) -> str:
         """按「被问次数的倒数」加权随机选取一名玩家。
 
         权重 = 1 / (ask_counts.get(pid, 0) + 1)：被问次数越少，权重越大；

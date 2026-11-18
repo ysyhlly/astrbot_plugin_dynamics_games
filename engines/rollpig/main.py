@@ -1,5 +1,4 @@
 from __future__ import annotations
-from ...runtime import Component
 
 import asyncio
 import re
@@ -9,6 +8,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context, StarTools
 from astrbot.core import AstrBotConfig
 
+from ...runtime import Component
 from .rollpig.adapter import AtTargetResolver, PigPresenter
 from .rollpig.config import PluginSettings
 from .rollpig.messages import CATALOG_UNAVAILABLE

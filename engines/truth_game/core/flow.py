@@ -35,7 +35,8 @@
 from __future__ import annotations
 
 import random
-from typing import Any, Awaitable, Callable, List, Optional, Tuple
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from astrbot.api import logger
 
@@ -139,8 +140,8 @@ async def _safe_build_question(
     context: Any,
     config: Any,
     *,
-    memory_context: Optional[List[str]] = None,
-    askee_name: Optional[str] = None,
+    memory_context: list[str] | None = None,
+    askee_name: str | None = None,
 ) -> str:
     """build_question with double bank fallback; never raises."""
     name = (askee_name if askee_name is not None else _askee_nickname(room)) or None
@@ -179,7 +180,7 @@ async def _enrich_memories(
     *,
     enable_livingmemory: bool,
     memory_k: int,
-) -> Optional[List[str]]:
+) -> list[str] | None:
     """Optional LM enrich; failures → None, never raises."""
     if not enable_livingmemory:
         return None
@@ -200,7 +201,7 @@ async def _enrich_memories(
     return None
 
 
-def _pair_askee(room: Room) -> Tuple[str, str]:
+def _pair_askee(room: Room) -> tuple[str, str]:
     """Resolve (asker, askee) from last_pair with safe fallbacks."""
     if room.last_pair is not None:
         asker, askee = room.last_pair
@@ -219,7 +220,7 @@ async def resolve_bot_question(
     room: Room,
     context: Any = None,
     config: Any = None,
-    rng: Optional[random.Random] = None,  # noqa: ARG001 - reserved / partial compat
+    rng: random.Random | None = None,  # noqa: ARG001 - reserved / partial compat
     bot_ask_frequency_unused: Any = None,  # noqa: ARG001 - partial signature pad
     **_kwargs: Any,
 ) -> str:
@@ -284,7 +285,7 @@ def build_advance_hook(
     context: Any,
     config: Any,
     manager: RoomManager,
-    rng: Optional[random.Random] = None,
+    rng: random.Random | None = None,
 ) -> Callable[[Room, RoomManager], Awaitable[str]]:
     """创建真正的 advance_hook，并接线 ``manager.resolve_asker_bot``。
 
@@ -470,7 +471,7 @@ async def announce(
     """
     del manager, room  # 签名保留；当前播报只需要 asker/askee 的 user_id
     if asker_id == BOT_ASKER_ID:
-        parts: List[Tuple[str, str]] = [("text", "我")]
+        parts: list[tuple[str, str]] = [("text", "我")]
     else:
         parts = [("at", asker_id)]
     parts.append(("text", " 问 "))
@@ -521,7 +522,7 @@ async def announce_choice(room: Any, config: Any = None) -> Reply:
         return Reply.plain(_MISSING_PAIR_MSG)
     asker, askee = str(pair[0]), str(pair[1])
     stage = str(getattr(room, "round_stage", "") or "")
-    parts: List[Tuple[str, str]] = []
+    parts: list[tuple[str, str]] = []
     if asker == BOT_ASKER_ID:
         parts.append(("text", "🎲 轮到 我"))
     else:
@@ -620,7 +621,7 @@ async def maybe_auto_end(
     config: Any,
     *,
     room=None,
-) -> Optional[Reply]:
+) -> Reply | None:
     """Settle the same room whose question triggered the round limit."""
     if room is None and manager is not None:
         room = manager.rooms.get(group_id)

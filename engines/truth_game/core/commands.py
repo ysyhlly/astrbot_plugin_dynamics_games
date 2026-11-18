@@ -34,9 +34,9 @@ RoomManager contract used (T3): ``create/join/start -> (ok, reason)``;
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
-Part = Tuple[str, str]  # ("text", str) | ("at", qq: str)
+Part = tuple[str, str]  # ("text", str) | ("at", qq: str)
 
 
 @dataclass
@@ -47,10 +47,10 @@ class Reply:
     :meth:`text` or on the rendered chain.
     """
 
-    parts: List[Part] = field(default_factory=list)
+    parts: list[Part] = field(default_factory=list)
 
     @classmethod
-    def plain(cls, text: str) -> "Reply":
+    def plain(cls, text: str) -> Reply:
         return cls(parts=[("text", text)])
 
     def text(self) -> str:
@@ -83,7 +83,7 @@ HELP_TEXT = """🎯 真心话 · 群聊真心话小游戏
 
 
 # ----------------------------------------------------------- event extraction
-def group_id_of(event: Any) -> Optional[str]:
+def group_id_of(event: Any) -> str | None:
     """Group id via ``get_group_id``; ``None``/empty on private chats."""
     try:
         return str(event.get_group_id() or "") or None
@@ -91,7 +91,7 @@ def group_id_of(event: Any) -> Optional[str]:
         return None
 
 
-def user_id_of(event: Any) -> Optional[str]:
+def user_id_of(event: Any) -> str | None:
     """Sender id via ``get_sender_id`` with ``sender_id`` attribute fallback.
 
     NEVER falls back to ``event.unified_msg_origin`` (see module docstring).
@@ -130,7 +130,7 @@ def room_origin_of(event: Any) -> str:
 
 def _preflight(
     manager: Any, event: Any, need_uid: bool, *, checks_room: bool = True,
-) -> Tuple[Optional[Reply], Optional[str], Optional[str]]:
+) -> tuple[Reply | None, str | None, str | None]:
     """Common guards; returns ``(failure_reply_or_None, gid, uid)``.
 
     Order matters: group check first (private chat → hint), then the manager
@@ -494,7 +494,7 @@ async def handle_playing_message(
     is_admin: bool,
     *,
     umo: str = "",
-) -> Optional[Reply]:
+) -> Reply | None:
     """Playing-phase free-form handler (choice + self-question + quote-answer).
 
     AstrBot-free: main.py applies wake/prefix/self-id guards and passes

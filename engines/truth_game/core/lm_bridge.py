@@ -36,7 +36,11 @@ from typing import Any
 try:
     from ....bridges.memory_bridge import (
         FACADE_MODULES as _LM_FACADE_MODULES,
+    )
+    from ....bridges.memory_bridge import (
         MEMORY_ALIASES as _SHARED_LM_ALIASES,
+    )
+    from ....bridges.memory_bridge import (
         _star_is_usable,
         _star_meta,
     )

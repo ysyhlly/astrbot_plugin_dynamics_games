@@ -52,8 +52,14 @@ from .core.web_console import GamesWebConsole
 from .engines.blackjack21.main import Blackjack21Plugin as Blackjack21Engine
 from .engines.rollpig.main import (
     COMMAND_ALIASES as ROLLPIG_ALIASES,
+)
+from .engines.rollpig.main import (
     COMMAND_NAME as ROLLPIG_CMD,
+)
+from .engines.rollpig.main import (
     WAKE_FREE_PATTERN as ROLLPIG_WAKE_FREE_PATTERN,
+)
+from .engines.rollpig.main import (
     RollPigPlugin as RollPigEngine,
 )
 from .engines.truth_game.main import TruthGamePlugin as TruthGameEngine

@@ -1,5 +1,4 @@
 from __future__ import annotations
-from ...runtime import Component
 
 import asyncio
 import hashlib
@@ -17,6 +16,8 @@ from astrbot.core.message.message_event_result import MessageEventResult
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
+
+from ...runtime import Component
 
 PLUGIN_VERSION = "1.5.3"
 
@@ -756,20 +757,20 @@ class Blackjack21Plugin(Component):
         room.phase = "finished"
         self._cancel_waiting_timer(room.group_id)
         self.rooms.pop(room.group_id, None)
-        cb = getattr(self, 'outcome_callback', None)
+        cb = getattr(self, "outcome_callback", None)
         if callable(cb) and players:
             try:
                 await cb(
                     event=room.reply_event,
                     group_id=str(room.group_id),
-                    game_key='blackjack21',
-                    title='21点对局',
+                    game_key="blackjack21",
+                    title="21点对局",
                     rounds=max(1, int(room.round_no)),
-                    participants=[{'uid': str(p.user_id), 'name': str(p.user_id), 'role_weight': 3 if p.user_id in winner_ids else 1} for p in players],
+                    participants=[{"uid": str(p.user_id), "name": str(p.user_id), "role_weight": 3 if p.user_id in winner_ids else 1} for p in players],
                     summary=f"21点对局结算（共 {max(1, int(room.round_no))} 轮，{len(players)} 人参与），本局第一点数 {winner_score} 点。",
                 )
             except Exception as exc:
-                logger.warning('21点结果同步失败: %s', exc)
+                logger.warning("21点结果同步失败: %s", exc)
         return parts
 
     async def _advance_after_full_round(

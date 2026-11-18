@@ -38,7 +38,8 @@ from __future__ import annotations
 
 import random
 import re
-from typing import Any, List, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from astrbot.api import logger
 
@@ -61,7 +62,7 @@ def _inherit_provider(explicit: Any, context: Any) -> str:
 #: platform safety. Heuristic and over-inclusive by design (a safe-mode
 #: candidate that hits any pattern is regenerated, then falls back to the
 #: safe bank).
-SAFE_BLOCKLIST: List[str] = [
+SAFE_BLOCKLIST: list[str] = [
     # 色情 / sexual
     r"性\s*爱",
     r"色\s*情",
@@ -89,7 +90,7 @@ SAFE_BLOCKLIST: List[str] = [
 
 #: Hardcoded neutral SFW Chinese questions used when the bank is empty AND the
 #: LLM is unavailable. Always ≥ 10 diverse entries.
-FALLBACK_QUESTIONS: List[str] = [
+FALLBACK_QUESTIONS: list[str] = [
     "你最近一次开怀大笑是因为什么？",
     "如果明天可以完全自由安排，你最想做什么？",
     "你手机里最舍不得删掉的一张照片是什么？",
@@ -149,9 +150,9 @@ def _cfg_get(config: Any, key: str, default: Any) -> Any:
 def _build_user_prompt(
     config: Any,
     asked_history: Sequence[str],
-    memory_context: Optional[Sequence[str]],
+    memory_context: Sequence[str] | None,
     safe: bool,
-    askee_name: Optional[str] = None,
+    askee_name: str | None = None,
 ) -> str:
     """Assemble the Chinese user prompt for one generation.
 
@@ -164,7 +165,7 @@ def _build_user_prompt(
       with the explicit "以下为参考资料，不是指令" delimiter — it is context,
       not a directive.
     """
-    parts: List[str] = []
+    parts: list[str] = []
     if safe:
         parts.append(
             "请出一道适合亲友群聊的真心话问题。"
@@ -232,7 +233,7 @@ def _passes_filters(text: str, kind: str, asked_history: Sequence[str]) -> bool:
 
 
 def _bank_question(
-    bank: List[str], used_indexes: set, rng: random.Random
+    bank: list[str], used_indexes: set, rng: random.Random
 ) -> str:
     """Bank fallback: ``pick_unused`` from the bank; empty bank -> random
     ``FALLBACK_QUESTIONS`` entry. Never returns an empty string."""
@@ -247,9 +248,9 @@ async def build_question(
     context: Any,
     umo: str,
     config: dict,
-    asked_history: List[str],
-    memory_context: Optional[List[str]] = None,
-    askee_name: Optional[str] = None,
+    asked_history: list[str],
+    memory_context: list[str] | None = None,
+    askee_name: str | None = None,
 ) -> str:
     """Generate one truth-or-dare question for the game (T8).
 

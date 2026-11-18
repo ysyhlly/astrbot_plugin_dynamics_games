@@ -1,4 +1,3 @@
-from ...runtime import Component
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import At, Plain
@@ -6,6 +5,7 @@ from astrbot.api.message_components import Reply as MsgReply
 from astrbot.api.star import Context
 from astrbot.core.message.message_event_result import MessageEventResult
 
+from ...runtime import Component
 from .core.commands import (
     Reply,
     cmd_create,

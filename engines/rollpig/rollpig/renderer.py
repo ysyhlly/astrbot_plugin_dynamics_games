@@ -18,8 +18,8 @@ from pathlib import Path
 from PIL import Image as PILImage
 from PIL import ImageDraw
 
-from .log_types import DiagnosticLogger
 from . import messages
+from .log_types import DiagnosticLogger
 from .models import Pig
 from .repository import PigRepository
 from .text import FontLibrary, FontType, TextMetrics
