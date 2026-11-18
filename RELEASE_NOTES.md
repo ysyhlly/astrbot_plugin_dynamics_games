@@ -1,4 +1,6 @@
-# astrbot_plugin_dynamics_games v0.1.1-rc.2
+# astrbot_plugin_dynamics_games v0.1.1-rc.3
+
+协作桥接、真心话和抽猪引擎统一使用 AstrBot SDK 日志，渲染和存储组件仍可注入日志对象。打包检查覆盖全部随包 Python 模块。
 
 系列面板显示安装版本及源码短提交号。
 

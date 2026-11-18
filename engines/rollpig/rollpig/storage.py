@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
+from .log_types import DiagnosticLogger
 from .models import DailyBoard
 
 
@@ -24,7 +24,7 @@ class BoardStore:
     日期不匹配视为新的一天。
     """
 
-    def __init__(self, path: Path, logger: logging.Logger) -> None:
+    def __init__(self, path: Path, logger: DiagnosticLogger) -> None:
         self._path = path
         self._logger = logger
 

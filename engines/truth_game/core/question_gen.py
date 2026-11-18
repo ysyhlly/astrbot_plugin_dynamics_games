@@ -36,16 +36,15 @@ plus stdlib, so this module (and its tests) run standalone.
 
 from __future__ import annotations
 
-import logging
 import random
 import re
 from typing import Any, List, Optional, Sequence
 
+from astrbot.api import logger
+
 from .banks import load_bank, pick_unused
 from .llm_call import call_llm
 from .persona import resolve_system_prompt
-
-logger = logging.getLogger(__name__)
 
 
 def _inherit_provider(explicit: Any, context: Any) -> str:

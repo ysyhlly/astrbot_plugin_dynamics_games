@@ -34,17 +34,16 @@
 
 from __future__ import annotations
 
-import logging
 import random
 from typing import Any, Awaitable, Callable, List, Optional, Tuple
+
+from astrbot.api import logger
 
 from .commands import Reply
 from .lottery import BOT_ASKER_ID, Lottery
 from .memory_enrich import enrich_for_askee
 from .question_gen import build_question
 from .room import Room, RoomManager
-
-logger = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------- config access

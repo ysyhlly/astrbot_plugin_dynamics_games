@@ -41,13 +41,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 from uuid import uuid4
 
-logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 _AWAITING_ASKER_STAGES = frozenset({"awaiting_asker_mode", "awaiting_asker_question"})
 

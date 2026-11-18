@@ -35,10 +35,9 @@ Design constraints:
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 #: Whole-sequence retry budget: first attempt + one fast-failure retry.
 _SEQUENCE_ATTEMPTS = 2

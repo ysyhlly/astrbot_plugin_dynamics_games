@@ -23,10 +23,9 @@ Design constraints:
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 PERSONA_MODE_OFF = "off"
 PERSONA_MODE_CORE = "core_persona"

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from typing import Any
 
-from ..core.models import CATEGORIES, RISK_WORDS, activity_fingerprint
+from astrbot.api import logger
 
-logger = logging.getLogger("astrbot.plugin.astrbot_plugin_dynamics_games.chronicle_bridge")
+from ..core.models import CATEGORIES, RISK_WORDS, activity_fingerprint
 
 DEFAULT_BRIDGE_TIMEOUT = 15.0
 

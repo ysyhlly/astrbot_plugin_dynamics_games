@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 import threading
 from typing import Any
+
+from astrbot.api import logger
 
 try:
     from astrbot.api.star import Star
@@ -134,9 +135,7 @@ class Component:
         self.plugin_id = getattr(
             self.owner, "plugin_id", f"ysyhlly/{PLUGIN_ID}"
         )
-        self.logger = getattr(self.owner, "logger", None) or logging.getLogger(
-            f"astrbot.plugin.{PLUGIN_ID}"
-        )
+        self.logger = logger
 
     async def get_kv_data(self, key: str, default: Any = None) -> Any:
         if self.owner is not None:

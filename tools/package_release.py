@@ -1,6 +1,7 @@
 """Build deterministic plugin install/source archives without local state."""
 from __future__ import annotations
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -44,6 +45,23 @@ def files(root: Path):
                 continue
             yield path
 
+def check_python(source, filename, *, runtime):
+    """Compile source and reject standard logging in every installed Python module."""
+    tree = ast.parse(source, filename=filename)
+    compile(tree, filename, "exec")
+    if not runtime:
+        return
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            modules = [node.module or ""]
+        else:
+            continue
+        if any(name == "logging" or name.startswith("logging.") for name in modules):
+            raise ValueError(f"{filename}:{node.lineno}: runtime must use astrbot.api.logger")
+
+
 def build(root: Path, output: Path):
     metadata_raw = release_metadata(root)
     metadata = metadata_raw.decode('utf-8-sig')
@@ -61,7 +79,7 @@ def build(root: Path, output: Path):
                 continue
             raw = metadata_raw if rel.as_posix() == 'metadata.yaml' else path.read_bytes()
             if path.suffix == '.py':
-                compile(raw, rel.as_posix(), 'exec')
+                check_python(raw, rel.as_posix(), runtime=kind == "install")
             contents[rel.as_posix()] = raw
         assert {'main.py', 'metadata.yaml', 'LICENSE', 'CHANGELOG.md', 'RELEASE_NOTES.md'} <= contents.keys()
         manifest = {key: hashlib.sha256(raw).hexdigest() for key, raw in contents.items()}

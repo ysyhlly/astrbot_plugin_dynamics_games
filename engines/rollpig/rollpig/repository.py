@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 from typing import Any, Mapping
 
+from .log_types import DiagnosticLogger
 from .models import Pig
 
 IMAGE_EXTENSIONS: tuple[str, ...] = ("png", "jpg", "jpeg", "webp", "gif")
@@ -22,7 +22,7 @@ class PigRepository:
         self,
         catalog_path: Path,
         image_dir: Path,
-        logger: logging.Logger,
+        logger: DiagnosticLogger,
     ) -> None:
         self._catalog_path = catalog_path
         self._image_dir = image_dir

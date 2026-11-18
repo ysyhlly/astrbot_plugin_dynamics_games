@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from typing import Any
+
+from astrbot.api import logger
 
 from ..bridges.chronicle_bridge import chronicle_status, sync_outcome_to_chronicle
 from ..bridges.memory_bridge import memory_status, sync_experience_to_memory
@@ -16,8 +17,6 @@ from .models import (
     resolve_category,
 )
 from .store import ActivityStore, check_activity_revision
-
-logger = logging.getLogger("astrbot.plugin.astrbot_plugin_dynamics_games.coordinator")
 
 
 class ActivityCoordinator:

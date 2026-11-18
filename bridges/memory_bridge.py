@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import logging
 import time
 from typing import Any
 
-logger = logging.getLogger("astrbot.plugin.astrbot_plugin_dynamics_games.memory_bridge")
+from astrbot.api import logger
 
 DEFAULT_BRIDGE_TIMEOUT = 15.0
 

@@ -6,13 +6,13 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 import astrbot.api.message_components as Comp
 from astrbot.api.event import AstrMessageEvent
 
+from .log_types import DiagnosticLogger
 from . import messages
 from .config import PluginSettings
 from .models import Pig
@@ -69,7 +69,7 @@ class AtTargetResolver:
 class PigPresenter:
     """出站：把领域对象转换成 AstrBot 消息链。"""
 
-    def __init__(self, settings: PluginSettings, logger: logging.Logger) -> None:
+    def __init__(self, settings: PluginSettings, logger: DiagnosticLogger) -> None:
         self._settings = settings
         self._logger = logger
 

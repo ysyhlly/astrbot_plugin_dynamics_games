@@ -1,0 +1,9 @@
+"""Diagnostic methods used by the card renderer and storage adapters."""
+
+from typing import Protocol
+
+
+class DiagnosticLogger(Protocol):
+    def debug(self, msg: str, *args: object) -> None: ...
+    def warning(self, msg: str, *args: object) -> None: ...
+    def error(self, msg: str, *args: object) -> None: ...
