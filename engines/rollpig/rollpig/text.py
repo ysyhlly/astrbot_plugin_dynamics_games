@@ -63,11 +63,15 @@ class FontLoader:
 
 
 class RegularFontLoader(FontLoader):
-    """常规字体：描述与解析正文。"""
+    """常规字体：描述与解析正文。
+
+    保留 ``可爱字体.ttf`` 作为用户手动自定义覆盖首位，默认随包使用 SIL OFL 1.1 开源字体
+    ``荆南麦圆体.otf``。
+    """
 
     purpose = "常规"
     size = 32
-    local_candidates = ("可爱字体.ttf", "SourceHanSansCN-Regular.otf")
+    local_candidates = ("可爱字体.ttf", "荆南麦圆体.otf", "SourceHanSansCN-Regular.otf")
     system_candidates = (
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttf",

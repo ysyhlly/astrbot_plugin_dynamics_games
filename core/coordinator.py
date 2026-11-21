@@ -514,6 +514,7 @@ class ActivityCoordinator:
         *,
         event: Any = None,
         group_id: str = "",
+        umo: str = "",
         game_key: str,
         title: str,
         rounds: int,
@@ -526,18 +527,20 @@ class ActivityCoordinator:
         """Record a completed multi-round room game or exported work into the ledger."""
         if len(participants) < 2 and rounds < 2:
             return None
-        umo = ""
+        resolved_umo = str(umo or "").strip()
         if event is not None:
-            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            if not resolved_umo:
+                resolved_umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
             if not group_id:
                 try:
                     group_id = str(event.get_group_id() or "")
                 except Exception:
                     group_id = ""
-        if not umo and group_id:
-            umo = f"aiocqhttp:GroupMessage:{group_id}"
-        if not umo or ":GroupMessage:" not in umo:
+        if not resolved_umo and group_id:
+            resolved_umo = f"aiocqhttp:GroupMessage:{group_id}"
+        if not resolved_umo or ":GroupMessage:" not in resolved_umo:
             return None
+        umo = resolved_umo
 
         if dedup_key:
             existing = await asyncio.to_thread(

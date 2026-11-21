@@ -45,8 +45,15 @@ from astrbot_plugin_dynamics_games.engines.blackjack21.main import (  # noqa: E4
 from astrbot_plugin_dynamics_games.engines.rollpig.rollpig.renderer import (  # noqa: E402
     AvatarBlock,
     CanvasSpec,
+    PigCardRenderer,
 )
-from astrbot_plugin_dynamics_games.engines.rollpig.rollpig.text import TextMetrics  # noqa: E402
+from astrbot_plugin_dynamics_games.engines.rollpig.rollpig.repository import (  # noqa: E402
+    PigRepository,
+)
+from astrbot_plugin_dynamics_games.engines.rollpig.rollpig.text import (  # noqa: E402
+    FontLibrary,
+    TextMetrics,
+)
 from astrbot_plugin_dynamics_games.engines.truth_game.core import lm_bridge  # noqa: E402
 from astrbot_plugin_dynamics_games.engines.what_to_eat.rate_limiter import (  # noqa: E402
     RateLimiter,
@@ -63,14 +70,53 @@ from test_dynamics_games import (  # noqa: E402
 
 
 def test_rollpig_fonts_unchanged_and_compressed_pngs_valid():
+    font_dir = PLUGIN_ROOT / "engines" / "rollpig" / "resource" / "font"
+    # Commercial font 可爱字体.ttf must NOT be bundled in the open-source package.
+    assert not (font_dir / "可爱字体.ttf").exists()
+
     expected_fonts = {
-        "可爱字体.ttf": "28D6BDBF9452BA98DE01DD6C3091BDB48ACFC51EABAFF73FE459FFACECFFA7FE",
         "荆南麦圆体.otf": "F2BD10A109F5E0D7FC39E7A0ADFE0DD55DC8297522558B4B577B93A505F86F0D",
     }
-    font_dir = PLUGIN_ROOT / "engines" / "rollpig" / "resource" / "font"
     for fname, digest in expected_fonts.items():
         actual = hashlib.sha256((font_dir / fname).read_bytes()).hexdigest().upper()
         assert actual == digest
+
+    # Bundled SIL OFL 1.1 license evidence must accompany the font and reference its SHA-256.
+    ofl_text = (font_dir / "OFL-1.1.txt").read_text(encoding="utf-8")
+    license_doc = (font_dir / "FONT_LICENSES.md").read_text(encoding="utf-8")
+    assert "SIL OPEN FONT LICENSE Version 1.1" in ofl_text
+    assert expected_fonts["荆南麦圆体.otf"] in license_doc
+    assert "SIL Open Font License" in license_doc
+
+    # Verify both regular and bold loaders resolve to the bundled OFL font and render a real card.
+    test_logger = logging.getLogger("test")
+    fonts = FontLibrary(font_dir, test_logger)
+    assert isinstance(fonts.regular, ImageFont.FreeTypeFont)
+    assert isinstance(fonts.bold, ImageFont.FreeTypeFont)
+    assert pathlib.Path(str(fonts.regular.path)).name == "荆南麦圆体.otf"
+    assert pathlib.Path(str(fonts.bold.path)).name == "荆南麦圆体.otf"
+
+    resource_dir = PLUGIN_ROOT / "engines" / "rollpig" / "resource"
+    repo = PigRepository(
+        catalog_path=resource_dir / "pig.json",
+        image_dir=resource_dir / "image",
+        logger=test_logger,
+    )
+    renderer = PigCardRenderer(
+        repository=repo,
+        fonts=fonts,
+        metrics=TextMetrics(),
+        spec=CanvasSpec(),
+        logger=test_logger,
+    )
+    rendered_path = renderer.render(repo.pigs[0])
+    assert rendered_path is not None and rendered_path.exists()
+    try:
+        with Image.open(rendered_path) as card_img:
+            card_img.verify()
+            assert card_img.size[0] > 0 and card_img.size[1] > 0
+    finally:
+        rendered_path.unlink(missing_ok=True)
 
     png_dir = PLUGIN_ROOT / "engines" / "rollpig" / "resource" / "image"
     pngs = sorted(png_dir.glob("*.png"))

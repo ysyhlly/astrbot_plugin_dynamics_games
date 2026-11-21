@@ -137,8 +137,9 @@ function syncUmoDropdown(knownUmos = []) {
 }
 
 function renderStats(stats = {}) {
+  const openCount = Number(stats.open_activities ?? 0);
   const items = [
-    ['进行中协作', stats.open_activities ?? 0],
+    ['进行中协作', openCount],
     ['已完结成果', stats.completed_activities ?? 0],
     ['群间记忆已存档', stats.memory_recorded ?? 0],
     ['群史记已收录', stats.chronicle_admitted ?? 0],
@@ -149,6 +150,53 @@ function renderStats(stats = {}) {
     box.append(el('strong', '', val), el('span', '', msg(label)));
     return box;
   }));
+  const tabBadge = $('#tab-open-badge');
+  if (tabBadge) {
+    tabBadge.hidden = openCount <= 0;
+    tabBadge.textContent = openCount > 0 ? String(openCount) : '';
+  }
+}
+
+function buildStageStepper(act) {
+  const wrap = el('div', 'card-stepper');
+  const status = String(act.status || 'recruiting');
+  const phases = [
+    {key: 'recruiting', label: '报名'},
+    {key: 'active', label: status === 'active' && act.current_stage ? `进行中·${act.current_stage}` : '进行中'},
+    {key: 'completed', label: status === 'cancelled' ? '已取消' : '结项'},
+  ];
+  const rank = status === 'completed' ? 2 : status === 'active' ? 1 : status === 'cancelled' ? -1 : 0;
+  wrap.setAttribute('aria-label', `阶段进度：${act.status_label || status} · ${act.current_stage || ''}`);
+  phases.forEach((ph, idx) => {
+    if (idx > 0) wrap.append(el('span', 'card-step-arrow', '→'));
+    let cls = 'card-step';
+    if (status === 'cancelled' && idx === 2) {
+      cls += ' is-cancelled';
+    } else if (status === 'completed') {
+      cls += ' is-done';
+    } else if (rank >= 0 && idx < rank) {
+      cls += ' is-done';
+    } else if (idx === rank) {
+      cls += ' is-current';
+    }
+    const pill = el('span', cls);
+    pill.append(el('span', 'card-step-dot'), el('span', '', ph.label));
+    wrap.append(pill);
+  });
+  return wrap;
+}
+
+function buildMiniProgress(act) {
+  const count = Number(act.contribution_count ?? 0);
+  const target = Math.max(1, Number(act.target_count || 1));
+  const pct = Math.min(100, Math.round((count / target) * 100));
+  const row = el('div', 'mini-progress-row');
+  const track = el('div', 'mini-progress-track');
+  const fill = el('div', 'mini-progress-fill');
+  fill.style.width = `${pct}%`;
+  track.append(fill);
+  row.append(track, el('span', '', `${count}/${target} (${pct}%)`));
+  return row;
 }
 
 function renderHome() {
@@ -174,9 +222,11 @@ function renderHome() {
   const totalEngines = (overviewData.engines || []).length;
   const legacyConflicts = (overviewData.legacy_plugins || []).filter(p => p.activated);
   const legacyBadge = $('#legacy-status-badge');
+  const contractDetails = $('#contract-details');
   if (legacyConflicts.length) {
     legacyBadge.className = 'badge danger';
     setText(legacyBadge, msg('{0} 个旧插件仍开启',legacyConflicts.length));
+    if (contractDetails) contractDetails.open = true;
   } else {
     legacyBadge.className = 'badge';
     setText(legacyBadge, msg('{0} 项引擎已无冲突接管',totalEngines));
@@ -249,15 +299,14 @@ function renderHomeOpenList(openItems = []) {
     const head = el('span', 'list-item-head');
     head.append(
       el('span', 'list-item-title', `${act.category_icon || ''} [${act.id}] ${act.title}`),
-      el('span', 'badge', `${act.status_label} · ${act.current_stage}`)
+      el('span', act.status === 'recruiting' ? 'badge warn' : 'badge info', `${act.status_label} · ${act.current_stage}`)
     );
     const meta = el('span', 'list-item-meta');
     meta.append(
       el('span', '', `群聊：${formatScopeLabel(act.umo)}`),
-      el('span', '', `参与：${act.participant_count ?? 0} 人`),
-      el('span', '', `进度：${act.contribution_count ?? 0}/${act.target_count}`)
+      el('span', '', `参与：${act.participant_count ?? 0} 人`)
     );
-    row.append(head, meta);
+    row.append(head, buildStageStepper(act), buildMiniProgress(act), meta);
     row.onclick = async () => {
       if (!row.isConnected || epoch !== scopeEpoch) return;
       await switchTab('activities', act.id);
@@ -317,7 +366,13 @@ function renderActivityList() {
   for (const act of activitiesList) {
     const item = listButton(act.id === selectedActivityId);
     const head = el('span', 'list-item-head');
-    const stCls = act.status === 'cancelled' ? 'badge danger' : act.status === 'completed' ? 'badge neutral' : 'badge';
+    const stCls = act.status === 'cancelled'
+      ? 'badge danger'
+      : act.status === 'completed'
+        ? 'badge neutral'
+        : act.status === 'recruiting'
+          ? 'badge warn'
+          : 'badge info';
     head.append(
       el('span', 'list-item-title', `${act.category_icon || ''} [${act.id}] ${act.title}`),
       el('span', stCls, act.status_label)
@@ -325,11 +380,9 @@ function renderActivityList() {
     const meta = el('span', 'list-item-meta');
     meta.append(
       el('span', '', formatScopeLabel(act.umo)),
-      el('span', '', `阶段：${act.current_stage}`),
-      el('span', '', `${act.participant_count ?? 0} 人报名`),
-      el('span', '', `进度 ${act.contribution_count ?? 0}/${act.target_count}`)
+      el('span', '', `${act.participant_count ?? 0} 人报名`)
     );
-    item.append(head, meta);
+    item.append(head, buildStageStepper(act), buildMiniProgress(act), meta);
     item.onclick = async () => {
       if (!item.isConnected) return;
       selectedActivityId = act.id;
@@ -743,7 +796,9 @@ async function switchTab(tab, directId = '') {
   }
   activeTab = tab;
   for (const btn of document.querySelectorAll('[data-tab]')) {
-    btn.classList.toggle('selected', btn.dataset.tab === tab);
+    const isSel = btn.dataset.tab === tab;
+    btn.classList.toggle('selected', isSel);
+    btn.setAttribute('aria-selected', String(isSel));
   }
   for (const name of ['home', 'activities', 'outcomes', 'engines']) {
     $(`#tab-${name}`).hidden = name !== tab;
@@ -875,7 +930,30 @@ $('#action-form').addEventListener('submit', async e => {
   await runActivityAction(act, action, note, valid, $('#action-confirm-btn'));
 });
 
-refreshAll();
+const initialQuery = new URLSearchParams(location.search);
+const initialTab = initialQuery.get('tab');
+const initialId = (initialQuery.get('id') || '').trim();
+if (initialTab && ['home', 'activities', 'outcomes', 'engines'].includes(initialTab)) {
+  refreshAll().then(() => {
+    if (initialTab !== 'home') switchTab(initialTab, initialId);
+  });
+} else {
+  refreshAll();
+}
+
+window.addEventListener('dynamics-cmdk-deeplink', e => {
+  const link = e.detail?.deep_link;
+  if (!link || typeof link !== 'object') return;
+  const tab = String(link.tab || '');
+  const id = String(link.id || '').trim();
+  const umo = groupScope(link.umo || '');
+  if (umo && umo !== currentUmo) {
+    changeScope(umo, true);
+  }
+  if (['home', 'activities', 'outcomes', 'engines'].includes(tab)) {
+    switchTab(tab, id);
+  }
+});
 
 window.addEventListener('series-languagechange', () => {
   if (overviewData) renderHome();

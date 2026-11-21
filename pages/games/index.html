@@ -8,7 +8,7 @@
   <meta name="color-scheme" content="light dark">
   <script src="theme.js?v=0.1.0"></script>
   <title data-series-text="群间游戏 · 一起完成一件事">群间游戏 · 一起完成一件事</title>
-  <link rel="stylesheet" href="style.css?v=round2.1">
+  <link rel="stylesheet" href="style.css?v=2.0">
   <link rel="stylesheet" href="./series-ui.css?v=round2.1">
   <script type="module" src="./series-panels.js?v=round2.1"></script>
 </head>
@@ -17,11 +17,24 @@
   <div class="app-shell series-workspace">
     <header class="series-nav">
       <a class="series-brand" href="#workspace"><span class="series-mark" aria-hidden="true">DG</span><span data-series-text="群间游戏">群间游戏</span></a>
-      <nav class="side-nav series-tabs" aria-label="内容分类" data-series-aria-label="内容分类">
-        <button data-tab="home" class="selected"><span class="nav-icon" aria-hidden="true">▦</span><span data-series-text="运行总览">运行总览</span></button>
-        <button data-tab="activities"><span class="nav-icon" aria-hidden="true">◎</span><span data-series-text="一起完成一件事">一起完成一件事</span></button>
-        <button data-tab="outcomes"><span class="nav-icon" aria-hidden="true">✦</span><span data-series-text="成果与归档">成果与归档</span></button>
-        <button data-tab="engines"><span class="nav-icon" aria-hidden="true">❖</span><span data-series-text="娱乐引擎总控">娱乐引擎总控</span></button>
+      <nav class="series-tabs" role="tablist" aria-label="内容分类" data-series-aria-label="内容分类">
+        <button data-tab="home" role="tab" aria-selected="true" class="selected">
+          <span class="nav-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>
+          <span data-series-text="运行总览">运行总览</span>
+        </button>
+        <button data-tab="activities" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m9 12 2 2 4-4"/></svg></span>
+          <span data-series-text="一起完成一件事">一起完成一件事</span>
+          <span id="tab-open-badge" class="tab-badge" hidden></span>
+        </button>
+        <button data-tab="outcomes" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
+          <span data-series-text="成果与归档">成果与归档</span>
+        </button>
+        <button data-tab="engines" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="4"/><path d="M6 12h4M8 10v4M15 11h.01M17 13h.01"/></svg></span>
+          <span data-series-text="娱乐引擎总控">娱乐引擎总控</span>
+        </button>
       </nav>
       <div class="series-nav-tools">
         <button id="theme-toggle" type="button" aria-pressed="false">
@@ -31,13 +44,28 @@
       </div>
     </header>
 
+    <section id="dynamics-series-panel" aria-label="互通插件状态" data-series-aria-label="互通插件状态">
+      <p class="sp-feedback" role="status" data-series-text="正在读取互通插件…">正在读取互通插件…</p>
+    </section>
+
     <div class="workspace-shell">
       <main id="workspace" tabindex="-1">
-        <header class="topbar series-heading">
-          <div>
-            <span class="eyebrow">CHAT DYNAMICS / GAMES</span>
+        <header class="topbar series-heading games-action-bar">
+          <div class="heading-copy">
+            <div class="heading-title-row">
+              <span class="eyebrow">DYNAMICS SERIES / GAMES</span>
+              <details class="info-popover ds-info-pop">
+                <summary class="info-trigger" aria-label="协作规则说明" data-series-aria-label="协作规则说明">
+                  <span class="info-icon" aria-hidden="true">i</span>
+                  <span data-series-text="协作说明">协作说明</span>
+                </summary>
+                <div class="info-popover-body">
+                  <p data-series-text="组织共读、游戏约局、接龙创作、小型挑战、共同制作作品 —— 负责报名、阶段、进度与成果。">组织共读、游戏约局、接龙创作、小型挑战、共同制作作品 —— 负责报名、阶段、进度与成果。</p>
+                  <p class="muted" data-series-text="群内可用 /活动 发起 ...，也可使用 /共读、/约局、/接龙 或 /挑战。">群内可用 /活动 发起 ...，也可使用 /共读、/约局、/接龙 或 /挑战。</p>
+                </div>
+              </details>
+            </div>
             <h1 data-series-text="群间游戏 · 一起完成一件事">群间游戏 · 一起完成一件事</h1>
-            <p data-series-text="组织共读、游戏约局、接龙创作、小型挑战、共同制作作品 —— 负责报名、阶段、进度与成果。">组织共读、游戏约局、接龙创作、小型挑战、共同制作作品 —— 负责报名、阶段、进度与成果。</p>
           </div>
           <div class="topbar-tools">
             <label class="scope-picker-wrap">
@@ -46,13 +74,10 @@
                 <option value="" data-series-text="全部群聊会话">全部群聊会话</option>
               </select>
             </label>
+            <button id="goto-create-btn" type="button" class="primary cta-create" data-series-text="+ 发起新协作">+ 发起新协作</button>
             <button id="refresh-btn" type="button" data-series-text="刷新数据">刷新数据</button>
           </div>
         </header>
-
-        <section id="dynamics-series-panel" aria-label="互通插件状态" data-series-aria-label="互通插件状态">
-          <p class="sp-feedback" role="status" data-series-text="正在读取互通插件…">正在读取互通插件…</p>
-        </section>
 
         <div id="notice" role="status" aria-live="polite" data-series-text="正在连接群间游戏控制台…">正在连接群间游戏控制台…</div>
 
@@ -60,41 +85,51 @@
 
         <!-- Tab 1: 运行总览 -->
         <section id="tab-home">
-          <div class="grid-two">
-            <article class="card">
-              <div class="card-top">
-                <h3 data-series-text="三层协作归属契约">三层协作归属契约</h3>
-                <span class="badge" data-series-text="职责分明 · 零重复入库">职责分明 · 零重复入库</span>
+          <article class="card card-primary">
+            <div class="card-top">
+              <div>
+                <h3 data-series-text="正在进行的协作活动">正在进行的协作活动</h3>
+                <p class="muted" data-series-text="点击任意协作卡片即可查看报名名册、推进阶段或定稿归档。">点击任意协作卡片即可查看报名名册、推进阶段或定稿归档。</p>
               </div>
-              <div id="ownership-list" class="ownership-stack"></div>
-            </article>
-            <article class="card">
-              <div class="card-top">
-                <h3 data-series-text="生态桥接与接管状态">生态桥接与接管状态</h3>
-                <span id="legacy-status-badge" class="badge" data-series-text="检查中">检查中</span>
-              </div>
-              <div id="bridge-health" class="ownership-stack"></div>
-            </article>
-          </div>
+              <button id="goto-activities-btn" type="button" data-series-text="查看全部活动">查看全部活动</button>
+            </div>
+            <div id="home-open-list" class="home-activity-grid"></div>
+          </article>
 
           <article class="card">
             <div class="card-top">
               <div>
                 <h3 data-series-text="五大协作模式速览">五大协作模式速览</h3>
-                <p class="muted" data-series-text="群内可用 /活动 发起 ...，也可使用 /共读、/约局、/接龙 或 /挑战。">群内可用 /活动 发起 ...，也可使用 /共读、/约局、/接龙 或 /挑战。</p>
+                <p class="muted" data-series-text="选择模式一键发起，或在群内发送 /共读、/约局、/接龙、/挑战。">选择模式一键发起，或在群内发送 /共读、/约局、/接龙、/挑战。</p>
               </div>
-              <button id="goto-create-btn" type="button" class="primary" data-series-text="+ 发起新协作">+ 发起新协作</button>
             </div>
             <div id="category-cards" class="category-grid"></div>
           </article>
 
-          <article class="card">
-            <div class="card-top">
-              <h3 data-series-text="正在进行的协作活动">正在进行的协作活动</h3>
-              <button id="goto-activities-btn" type="button" data-series-text="查看全部活动">查看全部活动</button>
+          <details id="contract-details" class="card games-contract-details">
+            <summary class="contract-summary">
+              <span class="contract-summary-left">
+                <span class="info-icon" aria-hidden="true">i</span>
+                <span data-series-text="三层协作归属契约与生态桥接状态">三层协作归属契约与生态桥接状态</span>
+              </span>
+              <span id="legacy-status-badge" class="badge" data-series-text="检查中">检查中</span>
+            </summary>
+            <div class="grid-two contract-body">
+              <div class="subcard">
+                <div class="card-top">
+                  <h3 data-series-text="三层协作归属契约">三层协作归属契约</h3>
+                  <span class="badge neutral" data-series-text="职责分明 · 零重复入库">职责分明 · 零重复入库</span>
+                </div>
+                <div id="ownership-list" class="ownership-stack"></div>
+              </div>
+              <div class="subcard">
+                <div class="card-top">
+                  <h3 data-series-text="生态桥接与接管状态">生态桥接与接管状态</h3>
+                </div>
+                <div id="bridge-health" class="ownership-stack"></div>
+              </div>
             </div>
-            <div id="home-open-list"></div>
-          </article>
+          </details>
         </section>
 
         <!-- Tab 2: 一起完成一件事 -->
@@ -220,11 +255,13 @@
   <!-- 完结/取消确认弹窗 -->
   <dialog id="action-dialog" aria-labelledby="action-dialog-title" aria-describedby="action-dialog-desc">
     <form id="action-form" method="dialog">
-      <h2 id="action-dialog-title" data-series-text="完结活动">完结活动</h2>
-      <p id="action-dialog-desc" class="muted"></p>
-      <label id="action-note-label"><span data-series-text="结项寄语 / 备注说明">结项寄语 / 备注说明</span>
-        <textarea id="action-note" rows="3" maxlength="600" placeholder="填写结项总结或取消原因…" data-series-placeholder="填写结项总结或取消原因…"></textarea>
-      </label>
+      <div class="action-fields">
+        <h2 id="action-dialog-title" data-series-text="完结活动">完结活动</h2>
+        <p id="action-dialog-desc" class="muted"></p>
+        <label id="action-note-label"><span data-series-text="结项寄语 / 备注说明">结项寄语 / 备注说明</span>
+          <textarea id="action-note" rows="3" maxlength="600" placeholder="填写结项总结或取消原因…" data-series-placeholder="填写结项总结或取消原因…"></textarea>
+        </label>
+      </div>
       <footer>
         <button type="button" id="action-cancel-btn" data-series-text="返回">返回</button>
         <button type="submit" id="action-confirm-btn" class="primary" data-series-text="确认执行">确认执行</button>
@@ -232,6 +269,6 @@
     </form>
   </dialog>
 
-  <script type="module" src="app.js?v=round2.1"></script>
+  <script type="module" src="app.js?v=2.0"></script>
 </body>
 </html>

@@ -82,7 +82,7 @@ class Player:
 
 @dataclass
 class Room:
-    """Per-group 21-point room state."""
+    """Per-session 21-point room state."""
 
     group_id: str
     host_id: str
@@ -100,6 +100,12 @@ class Room:
     started_at_ns: int = 0
     # Extra salt mixed into reshuffles within the same game.
     shuffle_seq: int = 0
+    # Adapter-aware full session key (e.g. UMO); defaults to group_id for legacy callers.
+    room_key: str = ""
+
+    def __post_init__(self) -> None:
+        self.group_id = str(self.group_id or "").strip()
+        self.room_key = str(self.room_key or "").strip() or self.group_id
 
 
 def is_joker(card: str) -> bool:
@@ -191,32 +197,73 @@ def extreme_card_index(cards: list[str], *, largest: bool) -> int | None:
 class Blackjack21Plugin(Component):
     """群聊 21 点小游戏（同步回合制）。
 
-    每个群独立一间房（按 group_id 隔离）。
+    每个会话独立一间房（按带适配器身份的完整会话键 room_key 隔离，避免多适配器同群号串房）。
     等人阶段超时未开局自动关房；对局中每轮限时，超时未操作视为停手。
     """
 
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
         self.config = config or {}
-        # group_id -> Room：一群一桌，互不影响
+        # room_key (full session/UMO or adapter+group) -> Room：每适配器每群一桌，互不影响
         self.rooms: dict[str, Room] = {}
         self._room_locks: dict[str, asyncio.Lock] = {}
         self.round_tasks: dict[str, asyncio.Task] = {}
         self.waiting_tasks: dict[str, asyncio.Task] = {}
 
-    def _room_lock(self, group_id: str) -> asyncio.Lock:
-        lock = self._room_locks.get(group_id)
+    @staticmethod
+    def _event_adapter_id(event: Any) -> str:
+        """Best-effort adapter/platform identifier when unified_msg_origin is absent."""
+        for method_name in ("get_platform_id", "get_platform_name"):
+            getter = getattr(event, method_name, None)
+            if callable(getter):
+                try:
+                    val = str(getter() or "").strip()
+                except Exception:
+                    val = ""
+                if val:
+                    return val
+        meta = getattr(event, "platform_meta", None)
+        if meta is not None:
+            for attr in ("id", "name"):
+                val = str(getattr(meta, attr, "") or "").strip()
+                if val:
+                    return val
+        return ""
+
+    @classmethod
+    def _room_key(cls, event: Any) -> tuple[str, str]:
+        """Return ``(room_key, native_group_id)`` for multi-adapter room isolation.
+
+        Prefers full ``unified_msg_origin``; falls back to ``<adapter>:GroupMessage:<group_id>``
+        when adapter metadata exists, and finally to bare ``group_id`` for minimal test stubs.
+        """
+        try:
+            group_id = str(event.get_group_id() or "").strip()
+        except Exception:
+            group_id = ""
+        if not group_id:
+            return "", ""
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if umo:
+            return umo, group_id
+        adapter_id = cls._event_adapter_id(event)
+        if adapter_id:
+            return f"{adapter_id}:GroupMessage:{group_id}", group_id
+        return group_id, group_id
+
+    def _room_lock(self, room_key: str) -> asyncio.Lock:
+        lock = self._room_locks.get(room_key)
         if lock is None:
             lock = asyncio.Lock()
-            self._room_locks[group_id] = lock
+            self._room_locks[room_key] = lock
         return lock
 
     async def terminate(self):
         """Cancel pending timers on unload."""
-        for gid in list(self.round_tasks):
-            self._cancel_round_timer(gid)
-        for gid in list(self.waiting_tasks):
-            self._cancel_waiting_timer(gid)
+        for rkey in list(self.round_tasks):
+            self._cancel_round_timer(rkey)
+        for rkey in list(self.waiting_tasks):
+            self._cancel_waiting_timer(rkey)
         self._room_locks.clear()
 
     def _mute_per_point(self) -> int:
@@ -371,13 +418,13 @@ class Blackjack21Plugin(Component):
             p for p in self._active_players(room) if p.user_id not in room.round_actions
         ]
 
-    def _cancel_round_timer(self, group_id: str) -> None:
+    def _cancel_round_timer(self, room_key: str) -> None:
         """Cancel pending round timer.
 
         If called from inside the timer task itself, only detach it from the
         map — cancelling the running task would abort settle/ban/send.
         """
-        task = self.round_tasks.pop(group_id, None)
+        task = self.round_tasks.pop(room_key, None)
         if not task or task.done():
             return
         try:
@@ -387,8 +434,8 @@ class Blackjack21Plugin(Component):
             pass
         task.cancel()
 
-    def _cancel_waiting_timer(self, group_id: str) -> None:
-        task = self.waiting_tasks.pop(group_id, None)
+    def _cancel_waiting_timer(self, room_key: str) -> None:
+        task = self.waiting_tasks.pop(room_key, None)
         if not task or task.done():
             return
         try:
@@ -400,8 +447,8 @@ class Blackjack21Plugin(Component):
 
     def _arm_waiting_timer(self, room: Room) -> None:
         """Auto-close room if still waiting after timeout."""
-        self._cancel_waiting_timer(room.group_id)
-        group_id = room.group_id
+        room_key = room.room_key
+        self._cancel_waiting_timer(room_key)
         timeout = self._waiting_timeout()
 
         async def _on_waiting_timeout() -> None:
@@ -409,23 +456,23 @@ class Blackjack21Plugin(Component):
                 await asyncio.sleep(timeout)
             except asyncio.CancelledError:
                 return
-            async with self._room_lock(group_id):
-                room_now = self.rooms.get(group_id)
+            async with self._room_lock(room_key):
+                room_now = self.rooms.get(room_key)
                 if not room_now or room_now.phase != "waiting":
                     return
-                self.rooms.pop(group_id, None)
-                self.waiting_tasks.pop(group_id, None)
+                self.rooms.pop(room_key, None)
+                self.waiting_tasks.pop(room_key, None)
                 result = self._result(
                     f"⏰ 21点房间创建后 {timeout // 60} 分钟仍未开始，已自动关闭。"
                 )
             await self._send_group(room_now, result)
 
-        self.waiting_tasks[group_id] = asyncio.create_task(_on_waiting_timeout())
+        self.waiting_tasks[room_key] = asyncio.create_task(_on_waiting_timeout())
 
     def _arm_round_timer(self, room: Room) -> None:
         """Start / restart the per-round timeout for this room."""
-        self._cancel_round_timer(room.group_id)
-        group_id = room.group_id
+        room_key = room.room_key
+        self._cancel_round_timer(room_key)
         round_no = room.round_no
         timeout = self._round_timeout()
         bot = room.bot
@@ -433,17 +480,17 @@ class Blackjack21Plugin(Component):
         async def _on_timeout() -> None:
             try:
                 await asyncio.sleep(timeout)
-                async with self._room_lock(group_id):
-                    room_now = self.rooms.get(group_id)
+                async with self._room_lock(room_key):
+                    room_now = self.rooms.get(room_key)
                     if room_now is not None and bot is not None and room_now.bot is None:
                         room_now.bot = bot
-                    await self._handle_round_timeout(group_id, round_no)
+                    await self._handle_round_timeout(room_key, round_no)
             except asyncio.CancelledError:
                 return
             except Exception as exc:  # noqa: BLE001
                 logger.error("21点回合超时处理失败: %s", exc, exc_info=True)
 
-        self.round_tasks[group_id] = asyncio.create_task(_on_timeout())
+        self.round_tasks[room_key] = asyncio.create_task(_on_timeout())
 
     def _begin_round(self, room: Room, bot: Any | None = None) -> None:
         room.round_no += 1
@@ -524,9 +571,9 @@ class Blackjack21Plugin(Component):
         return parts
 
     def _deck_entropy(self, room: Room) -> str:
-        """Build shuffle salt from group, players, start time, and reshuffle seq."""
+        """Build shuffle salt from session key, players, start time, and reshuffle seq."""
         ids = ",".join(sorted(room.players.keys()))
-        return f"{room.group_id}:{ids}:{room.started_at_ns}:{room.shuffle_seq}"
+        return f"{room.room_key}:{ids}:{room.started_at_ns}:{room.shuffle_seq}"
 
     def _new_deck(self, room: Room) -> list[str]:
         """Create a shuffled deck excluding held cards and the discard pile.
@@ -664,7 +711,7 @@ class Blackjack21Plugin(Component):
 
     async def _resolve_round(self, room: Room) -> list[Any]:
         """Apply all choices for the current round."""
-        self._cancel_round_timer(room.group_id)
+        self._cancel_round_timer(room.room_key)
         parts: list[Any] = [f"—— 第{room.round_no}轮结算 ——\n"]
         joker_drawn = False
         for uid, action in list(room.round_actions.items()):
@@ -722,7 +769,7 @@ class Blackjack21Plugin(Component):
 
     async def _settle(self, room: Room) -> list[Any]:
         """Settle scores and mute non-first players."""
-        self._cancel_round_timer(room.group_id)
+        self._cancel_round_timer(room.room_key)
         players = list(room.players.values())
         winners = self._pick_winners(players)
         winner_ids = {p.user_id for p in winners}
@@ -755,20 +802,30 @@ class Blackjack21Plugin(Component):
             )
 
         room.phase = "finished"
-        self._cancel_waiting_timer(room.group_id)
-        self.rooms.pop(room.group_id, None)
+        self._cancel_waiting_timer(room.room_key)
+        self.rooms.pop(room.room_key, None)
         cb = getattr(self, "outcome_callback", None)
         if callable(cb) and players:
             try:
-                await cb(
-                    event=room.reply_event,
-                    group_id=str(room.group_id),
-                    game_key="blackjack21",
-                    title="21点对局",
-                    rounds=max(1, int(room.round_no)),
-                    participants=[{"uid": str(p.user_id), "name": str(p.user_id), "role_weight": 3 if p.user_id in winner_ids else 1} for p in players],
-                    summary=f"21点对局结算（共 {max(1, int(room.round_no))} 轮，{len(players)} 人参与），本局第一点数 {winner_score} 点。",
-                )
+                cb_kwargs: dict[str, Any] = {
+                    "event": room.reply_event,
+                    "group_id": str(room.group_id),
+                    "game_key": "blackjack21",
+                    "title": "21点对局",
+                    "rounds": max(1, int(room.round_no)),
+                    "participants": [
+                        {
+                            "uid": str(p.user_id),
+                            "name": str(p.user_id),
+                            "role_weight": 3 if p.user_id in winner_ids else 1,
+                        }
+                        for p in players
+                    ],
+                    "summary": f"21点对局结算（共 {max(1, int(room.round_no))} 轮，{len(players)} 人参与），本局第一点数 {winner_score} 点。",
+                }
+                if ":" in room.room_key:
+                    cb_kwargs["umo"] = room.room_key
+                await cb(**cb_kwargs)
             except Exception as exc:
                 logger.warning("21点结果同步失败: %s", exc)
         return parts
@@ -810,28 +867,28 @@ class Blackjack21Plugin(Component):
         parts.extend(self._join_ats(self._waiting_players(room)))
         return self._result(*parts)
 
-    async def _handle_round_timeout(self, group_id: str, round_no: int) -> None:
+    async def _handle_round_timeout(self, room_key: str, round_no: int) -> None:
         """Auto-stand waiting players and resolve the round."""
         # Detach this timer from the map first (do not cancel self).
-        self.round_tasks.pop(group_id, None)
+        self.round_tasks.pop(room_key, None)
 
-        room = self.rooms.get(group_id)
+        room = self.rooms.get(room_key)
         if not room or room.phase != "playing" or room.round_no != round_no:
             logger.info(
-                "21点超时忽略：group=%s round=%s phase=%s",
-                group_id,
+                "21点超时忽略：room=%s round=%s phase=%s",
+                room_key,
                 round_no,
                 getattr(room, "phase", None),
             )
             return
         waiting = self._waiting_players(room)
         if not waiting:
-            logger.info("21点超时但无人待操作 group=%s round=%s", group_id, round_no)
+            logger.info("21点超时但无人待操作 room=%s round=%s", room_key, round_no)
             return
 
         logger.info(
-            "21点回合超时自动停手 group=%s round=%s users=%s",
-            group_id,
+            "21点回合超时自动停手 room=%s round=%s users=%s",
+            room_key,
             round_no,
             [p.user_id for p in waiting],
         )
@@ -850,13 +907,13 @@ class Blackjack21Plugin(Component):
 
     async def cmd_open(self, event: AstrMessageEvent):
         """Open a waiting room; sender becomes room admin."""
-        group_id = event.get_group_id()
+        room_key, group_id = self._room_key(event)
         if not group_id:
             yield event.plain_result("21点只能在群里玩。")
             return
 
-        async with self._room_lock(group_id):
-            existing = self.rooms.get(group_id)
+        async with self._room_lock(room_key):
+            existing = self.rooms.get(room_key)
             if existing and existing.phase != "finished":
                 reply = event.plain_result(
                     "本群已有进行中的21点，先打完或管理员发 /结束21点。"
@@ -867,10 +924,11 @@ class Blackjack21Plugin(Component):
                     group_id=group_id,
                     host_id=uid,
                     joker_mode=self._joker_mode(),
+                    room_key=room_key,
                 )
                 self._bind_event(room, event)
                 room.players[uid] = Player(user_id=uid, is_host=True)
-                self.rooms[group_id] = room
+                self.rooms[room_key] = room
                 self._arm_waiting_timer(room)
                 wait_min = self._waiting_timeout() // 60
                 joker_tip = " ·小丑模式已开启" if room.joker_mode else ""
@@ -888,13 +946,13 @@ class Blackjack21Plugin(Component):
 
     async def cmd_join(self, event: AstrMessageEvent):
         """Join the waiting room."""
-        group_id = event.get_group_id()
+        room_key, group_id = self._room_key(event)
         if not group_id:
             yield event.plain_result("21点只能在群里玩。")
             return
 
-        async with self._room_lock(group_id):
-            room = self.rooms.get(group_id)
+        async with self._room_lock(room_key):
+            room = self.rooms.get(room_key)
             if not room or room.phase != "waiting":
                 reply = event.plain_result("当前没有可加入的21点房间，先 /创建21点。")
             else:
@@ -916,13 +974,13 @@ class Blackjack21Plugin(Component):
 
     async def cmd_deal(self, event: AstrMessageEvent):
         """Room admin starts the game and opens round 1."""
-        group_id = event.get_group_id()
+        room_key, group_id = self._room_key(event)
         if not group_id:
             yield event.plain_result("21点只能在群里玩。")
             return
 
-        async with self._room_lock(group_id):
-            room = self.rooms.get(group_id)
+        async with self._room_lock(room_key):
+            room = self.rooms.get(room_key)
             if not room or room.phase != "waiting":
                 reply = event.plain_result("没有等待中的21点房间，先 /创建21点。")
             else:
@@ -939,7 +997,7 @@ class Blackjack21Plugin(Component):
                     room.discard = []
                     room.deck = self._new_deck(room)
                     room.phase = "playing"
-                    self._cancel_waiting_timer(group_id)
+                    self._cancel_waiting_timer(room_key)
                     for _ in range(2):
                         for p in room.players.values():
                             self._deal_one(room, p)
@@ -975,9 +1033,9 @@ class Blackjack21Plugin(Component):
 
     async def cmd_hit(self, event: AstrMessageEvent):
         """Choose to draw one card this round (resolved when all have chosen)."""
-        group_id = event.get_group_id() or ""
-        async with self._room_lock(group_id):
-            room = self.rooms.get(group_id)
+        room_key, _ = self._room_key(event)
+        async with self._room_lock(room_key):
+            room = self.rooms.get(room_key)
             if not room or room.phase != "playing":
                 reply = event.plain_result("现在没有进行中的21点。")
             else:
@@ -1005,9 +1063,9 @@ class Blackjack21Plugin(Component):
 
     async def cmd_stand(self, event: AstrMessageEvent):
         """Choose to stand this round (permanent once the round resolves)."""
-        group_id = event.get_group_id() or ""
-        async with self._room_lock(group_id):
-            room = self.rooms.get(group_id)
+        room_key, _ = self._room_key(event)
+        async with self._room_lock(room_key):
+            room = self.rooms.get(room_key)
             if not room or room.phase != "playing":
                 reply = event.plain_result("现在没有进行中的21点。")
             else:
@@ -1033,9 +1091,9 @@ class Blackjack21Plugin(Component):
 
     async def cmd_status(self, event: AstrMessageEvent):
         """Show current room."""
-        group_id = event.get_group_id() or ""
-        async with self._room_lock(group_id):
-            room = self.rooms.get(group_id)
+        room_key, _ = self._room_key(event)
+        async with self._room_lock(room_key):
+            room = self.rooms.get(room_key)
             if not room:
                 reply = event.plain_result("本群没有21点房间。发 /创建21点 开一局。")
             else:
@@ -1045,9 +1103,9 @@ class Blackjack21Plugin(Component):
 
     async def cmd_end(self, event: AstrMessageEvent):
         """Room admin cancels the room."""
-        group_id = event.get_group_id() or ""
-        async with self._room_lock(group_id):
-            room = self.rooms.get(group_id)
+        room_key, _ = self._room_key(event)
+        async with self._room_lock(room_key):
+            room = self.rooms.get(room_key)
             if not room:
                 reply = event.plain_result("本群没有21点房间。")
             else:
@@ -1055,8 +1113,8 @@ class Blackjack21Plugin(Component):
                 if uid != room.host_id and not event.is_admin():
                     reply = event.plain_result("只有本局管理员（或机器人管理员）能结束房间。")
                 else:
-                    self._cancel_round_timer(group_id)
-                    self._cancel_waiting_timer(group_id)
-                    self.rooms.pop(group_id, None)
+                    self._cancel_round_timer(room_key)
+                    self._cancel_waiting_timer(room_key)
+                    self.rooms.pop(room_key, None)
                     reply = event.plain_result("21点房间已结束。")
         yield reply

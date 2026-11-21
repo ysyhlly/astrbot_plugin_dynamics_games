@@ -1274,3 +1274,137 @@ class ActivityStore:
                 "chronicle_admitted": int(chronicle_cnt),
                 "known_umos": groups,
             }
+
+    def activity_count_since(self, since_ts: float, umo: str = "") -> int:
+        """Count activities updated and contributions logged since ``since_ts``."""
+        with self.connection(write=False) as db:
+            if umo:
+                acts = db.execute(
+                    "SELECT COUNT(*) FROM activities WHERE umo=? AND updated_at >= ?",
+                    (umo, float(since_ts)),
+                ).fetchone()[0]
+                contribs = db.execute(
+                    "SELECT COUNT(*) FROM contributions WHERE umo=? AND created_at >= ?",
+                    (umo, float(since_ts)),
+                ).fetchone()[0]
+            else:
+                acts = db.execute(
+                    "SELECT COUNT(*) FROM activities WHERE updated_at >= ?",
+                    (float(since_ts),),
+                ).fetchone()[0]
+                contribs = db.execute(
+                    "SELECT COUNT(*) FROM contributions WHERE created_at >= ?",
+                    (float(since_ts),),
+                ).fetchone()[0]
+            return int(acts) + int(contribs)
+
+    def search_items(
+        self, query: str, umo: str = "", limit: int = 8
+    ) -> list[dict[str, Any]]:
+        """Read-only search across activities and completed outcomes."""
+        clean = str(query or "").strip()
+        cap = max(1, min(50, int(limit or 8)))
+        if not clean:
+            return []
+        pattern = f"%{clean.lower()}%"
+        results: list[dict[str, Any]] = []
+        with self.connection(write=False) as db:
+            act_where = "WHERE (LOWER(a.id) LIKE ? OR LOWER(a.title) LIKE ? OR LOWER(a.description) LIKE ?)"
+            act_params: list[Any] = [pattern, pattern, pattern]
+            if umo:
+                act_where += " AND a.umo = ?"
+                act_params.append(umo)
+            act_params.append(cap)
+            act_rows = db.execute(
+                f"""
+                SELECT a.*,
+                    (SELECT COUNT(*) FROM participants p WHERE p.activity_id=a.id AND p.status='joined') AS participant_count,
+                    (SELECT COUNT(*) FROM contributions c WHERE c.activity_id=a.id) AS contribution_count
+                FROM activities a
+                {act_where}
+                ORDER BY
+                    CASE WHEN a.status IN ('recruiting', 'active') THEN 0 ELSE 1 END ASC,
+                    a.updated_at DESC
+                LIMIT ?
+                """,
+                tuple(act_params),
+            ).fetchall()
+            seen_ids: set[str] = set()
+            for r in act_rows:
+                act = self._hydrate_activity(r)
+                if act is None:
+                    continue
+                seen_ids.add(str(act["id"]))
+                results.append({"record_type": "activity", "data": act})
+
+            remaining = cap - len(results)
+            if remaining > 0:
+                out_where = "WHERE (LOWER(activity_id) LIKE ? OR LOWER(title) LIKE ? OR LOWER(summary) LIKE ?)"
+                out_params: list[Any] = [pattern, pattern, pattern]
+                if umo:
+                    out_where += " AND umo = ?"
+                    out_params.append(umo)
+                out_params.append(remaining + len(seen_ids))
+                out_rows = db.execute(
+                    f"""
+                    SELECT activity_id, umo, category, title, summary, valuable, importance, created_at
+                    FROM outcomes
+                    {out_where}
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    tuple(out_params),
+                ).fetchall()
+                for r in out_rows:
+                    if len(results) >= cap:
+                        break
+                    aid = str(r["activity_id"])
+                    if aid in seen_ids:
+                        continue
+                    d = dict(r)
+                    cat = CATEGORIES.get(d["category"], CATEGORIES["creation"])
+                    d["category_label"] = cat["label"]
+                    d["category_icon"] = cat["icon"]
+                    results.append({"record_type": "outcome", "data": d})
+        return results[:cap]
+
+    def recent_journal_rows(
+        self,
+        *,
+        since_ts: float,
+        until_ts: float,
+        umo: str = "",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Read-only activities updated or completed within [since_ts, until_ts)."""
+        cap = max(1, min(50, int(limit or 20)))
+        clauses = [
+            "a.status IN ('recruiting', 'active', 'completed')",
+            "a.updated_at >= ?",
+            "a.updated_at < ?",
+        ]
+        params: list[Any] = [float(since_ts), float(until_ts)]
+        if umo:
+            clauses.append("a.umo = ?")
+            params.append(umo)
+        params.append(cap)
+        where = "WHERE " + " AND ".join(clauses)
+        with self.connection(write=False) as db:
+            rows = db.execute(
+                f"""
+                SELECT a.*,
+                    (SELECT COUNT(*) FROM participants p WHERE p.activity_id=a.id AND p.status='joined') AS participant_count,
+                    (SELECT COUNT(*) FROM contributions c WHERE c.activity_id=a.id) AS contribution_count
+                FROM activities a
+                {where}
+                ORDER BY a.updated_at DESC, a.id DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+            out: list[dict[str, Any]] = []
+            for r in rows:
+                act = self._hydrate_activity(r)
+                if act is not None:
+                    out.append(act)
+            return out

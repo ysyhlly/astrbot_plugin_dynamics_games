@@ -13,12 +13,13 @@ ensure_current(
         ("core.coordinator", "ActivityCoordinator", "sync_outcome_records"),
         ("core.store", "ActivityStore", "save_completion"),
     ],
-    version="0.1.1-rc.4",
+    version="0.1.1-rc.5",
 )
 
 import asyncio
 import json
 import threading
+from datetime import datetime, timedelta, timezone
 from importlib import reload
 from typing import Any
 
@@ -72,12 +73,18 @@ MODULE_FLAG_MAP: dict[str, str] = {
 MODULE_LABEL_MAP: dict[str, str] = {
     item["key"]: item["label"] for item in ENGINE_CATALOG
 }
+LEGACY_ENGINE_PLUGIN_MAP: dict[str, str] = {
+    "truth_game": "astrbot_plugin_truth_game",
+    "blackjack21": "astrbot_plugin_blackjack21",
+    "rollpig": "astrbot_plugin_rollpig",
+    "what_to_eat": "astrbot_plugin_what_to_eat",
+}
 
 
 class DynamicsGamesPlugin(Star):
     """群间游戏：组织共读、游戏约局、接龙创作、小型挑战、共同制作作品与群聊娱乐引擎总成。"""
 
-    VERSION = "0.1.1-rc.4"
+    VERSION = "0.1.1-rc.5"
     name = PLUGIN_ID
     author = "ysyhlly"
     plugin_id = f"ysyhlly/{PLUGIN_ID}"
@@ -252,6 +259,294 @@ class DynamicsGamesPlugin(Star):
         if not self._ready or self.coordinator is None:
             return {"schema_version": 1, "umo": umo, "active_count": 0, "active_activities": []}
         return await self.coordinator.get_group_activity_context(umo)
+
+    @staticmethod
+    def _tz_shanghai() -> timezone:
+        return timezone(timedelta(hours=8))
+
+    @classmethod
+    def _iso_time(cls, ts: float | None = None) -> str:
+        dt = (
+            datetime.fromtimestamp(float(ts), tz=cls._tz_shanghai())
+            if ts is not None
+            else datetime.now(tz=cls._tz_shanghai())
+        )
+        return dt.isoformat(timespec="seconds")
+
+    @classmethod
+    def _date_window(cls, date_str: str = "today") -> tuple[float, float]:
+        tz = cls._tz_shanghai()
+        raw = str(date_str or "today").strip().lower()
+        now = datetime.now(tz=tz)
+        if not raw or raw == "today":
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif raw == "yesterday":
+            start = (now - timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+        else:
+            try:
+                parsed = datetime.strptime(raw[:10], "%Y-%m-%d").replace(tzinfo=tz)
+                start = parsed
+            except ValueError:
+                start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        return start.timestamp(), end.timestamp()
+
+    def get_series_summary(self) -> dict[str, Any]:
+        """Synchronous, read-only v2 series summary for presence badge/pulse."""
+        now_iso = self._iso_time()
+        try:
+            if self._legacy_conflicts:
+                cnt = len(self._legacy_conflicts)
+                return {
+                    "badge": {
+                        "count": cnt,
+                        "tone": "danger",
+                        "label": f"{cnt} 项旧插件冲突",
+                    },
+                    "pulse": {
+                        "headline": "检测到旧版娱乐插件冲突，停用后重载可恢复",
+                        "updated_at": now_iso,
+                    },
+                }
+            if self._closed or not self._ready or self.store is None:
+                return {
+                    "badge": {"count": 0, "tone": "muted", "label": "待就绪"},
+                    "pulse": {"headline": "群间游戏尚未就绪", "updated_at": now_iso},
+                }
+            stats = self.store.stats_summary()
+            open_cnt = int(stats.get("open_activities") or 0)
+            completed_cnt = int(stats.get("completed_activities") or 0)
+            active_rooms = 0
+            for key in ("truth_game", "blackjack21"):
+                eng = self.engines.get(key)
+                if eng is None:
+                    continue
+                if key == "truth_game":
+                    rm = getattr(eng, "room_manager", None)
+                    active_rooms += len(getattr(rm, "rooms", {}) or {})
+                else:
+                    active_rooms += len(getattr(eng, "rooms", {}) or {})
+            total_active = open_cnt + active_rooms
+            if total_active > 0:
+                label = (
+                    f"{open_cnt} 局进行中"
+                    if open_cnt > 0
+                    else f"{active_rooms} 房娱乐中"
+                )
+                headline = (
+                    f"{open_cnt} 项协作进行中 · 累计 {completed_cnt} 份成果"
+                    if open_cnt > 0
+                    else f"{active_rooms} 个娱乐房间进行中 · 累计 {completed_cnt} 份成果"
+                )
+                return {
+                    "badge": {"count": total_active, "tone": "info", "label": label},
+                    "pulse": {"headline": headline, "updated_at": now_iso},
+                }
+            return {
+                "badge": {"count": 0, "tone": "accent", "label": "空闲"},
+                "pulse": {
+                    "headline": f"暂无进行中协作 · 累计 {completed_cnt} 份成果",
+                    "updated_at": now_iso,
+                },
+            }
+        except Exception:
+            return {
+                "badge": {"count": 0, "tone": "muted", "label": "暂不可用"},
+                "pulse": {"headline": "群间游戏摘要暂不可用", "updated_at": now_iso},
+            }
+
+    def get_series_scope_status(self, umo: str) -> dict[str, Any]:
+        """Read-only per-group status for Chat Dynamics v2 group control matrix."""
+        target = str(umo or "").strip()
+        try:
+            ready = bool(self._ready and not self._closed and self.store is not None)
+            enabled = bool(self.activities_enabled()) if ready else None
+            if not ready or self.store is None:
+                return {
+                    "enabled": enabled,
+                    "supported": False,
+                    "persona_id": "",
+                    "activity_today": None,
+                    "summary": "群间游戏未就绪",
+                    "version": "0",
+                }
+            stats = self.store.stats_summary(target)
+            open_cnt = int(stats.get("open_activities") or 0)
+            completed_cnt = int(stats.get("completed_activities") or 0)
+            since_ts, _ = self._date_window("today")
+            today_cnt = self.store.activity_count_since(since_ts, umo=target)
+            summary = (
+                f"{open_cnt} 项进行中 · {completed_cnt} 份成果"
+                if enabled
+                else "协作活动已关闭"
+            )
+            return {
+                "enabled": enabled,
+                "supported": True,
+                "persona_id": "",
+                "activity_today": today_cnt,
+                "summary": summary,
+                "version": f"{int(bool(enabled))}:{open_cnt}:{completed_cnt}",
+            }
+        except Exception:
+            return {
+                "enabled": None,
+                "supported": False,
+                "persona_id": "",
+                "activity_today": None,
+                "summary": "状态暂不可用",
+                "version": "0",
+            }
+
+    def series_search_items(
+        self, query: str, scope: str = "", limit: int = 8
+    ) -> list[dict[str, Any]]:
+        """Read-only federated search hook for Ctrl+K command palette."""
+        clean = str(query or "").strip()
+        if not clean or self._closed:
+            return []
+        cap = max(1, min(50, int(limit or 8)))
+        target_scope = str(scope or "").strip()
+        items: list[dict[str, Any]] = []
+        try:
+            if self._ready and self.store is not None:
+                for hit in self.store.search_items(clean, umo=target_scope, limit=cap):
+                    rec_type = hit.get("record_type")
+                    data = hit.get("data") or {}
+                    if rec_type == "activity":
+                        aid = str(data.get("id") or "")
+                        items.append(
+                            {
+                                "kind": "协作活动",
+                                "title": f"[{aid}] {data.get('title') or ''}".strip(),
+                                "subtitle": (
+                                    f"{data.get('category_label') or '协作'} · "
+                                    f"{data.get('status_label') or ''} · "
+                                    f"{data.get('current_stage') or ''} · "
+                                    f"{int(data.get('participant_count') or 0)} 人"
+                                ),
+                                "plugin_id": PLUGIN_ID,
+                                "page": "games",
+                                "deep_link": {
+                                    "tab": "activities",
+                                    "id": aid,
+                                    "umo": str(data.get("umo") or ""),
+                                },
+                            }
+                        )
+                    elif rec_type == "outcome":
+                        aid = str(data.get("activity_id") or "")
+                        items.append(
+                            {
+                                "kind": "活动成果",
+                                "title": f"[{aid}] {data.get('title') or ''}".strip(),
+                                "subtitle": str(
+                                    data.get("summary")
+                                    or data.get("category_label")
+                                    or "已完结成果"
+                                )[:120],
+                                "plugin_id": PLUGIN_ID,
+                                "page": "games",
+                                "deep_link": {
+                                    "tab": "outcomes",
+                                    "id": aid,
+                                    "umo": str(data.get("umo") or ""),
+                                },
+                            }
+                        )
+
+            if len(items) < cap:
+                lower_q = clean.lower()
+                for spec in ENGINE_CATALOG:
+                    if len(items) >= cap:
+                        break
+                    hay = " ".join(
+                        [
+                            str(spec.get("key") or ""),
+                            str(spec.get("label") or ""),
+                            str(spec.get("desc") or ""),
+                            " ".join(spec.get("commands") or []),
+                        ]
+                    ).lower()
+                    if lower_q in hay:
+                        enabled = self.module_enabled(spec["key"])
+                        items.append(
+                            {
+                                "kind": "娱乐引擎",
+                                "title": str(spec.get("label") or spec.get("key")),
+                                "subtitle": f"{'运行中' if enabled else '已停用'} · {spec.get('desc') or ''}"[:120],
+                                "plugin_id": PLUGIN_ID,
+                                "page": "games",
+                                "deep_link": {"tab": "engines", "key": spec["key"]},
+                            }
+                        )
+        except Exception:
+            return items[:cap]
+        return items[:cap]
+
+    def get_journal_events(
+        self,
+        persona: str = "",
+        scope: str = "",
+        date: str = "today",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Read-only daily events for Dynamics World's Today's Living Journal feed."""
+        _ = persona
+        if self._closed or not self._ready or self.store is None:
+            return []
+        cap = max(1, min(50, int(limit or 20)))
+        try:
+            since_ts, until_ts = self._date_window(date)
+            rows = self.store.recent_journal_rows(
+                since_ts=since_ts,
+                until_ts=until_ts,
+                umo=str(scope or "").strip(),
+                limit=cap,
+            )
+            events: list[dict[str, Any]] = []
+            for act in rows:
+                aid = str(act.get("id") or "")
+                status = str(act.get("status") or "")
+                participants = int(act.get("participant_count") or 0)
+                contribs = int(act.get("contribution_count") or 0)
+                target = int(act.get("target_count") or 1)
+                if status == "completed":
+                    title = f"「{act.get('title') or aid}」已圆满完结并归档"
+                    subtitle = f"{act.get('category_label') or '协作'} · {participants} 位群友参与 · 共 {contribs} 条记录"
+                    tone = "accent"
+                    route = "games?tab=outcomes&id=" + aid
+                elif status == "recruiting":
+                    title = f"发起了「{act.get('title') or aid}」正在招募成员"
+                    subtitle = f"{act.get('category_label') or '协作'} · 已有 {participants} 位群友报名"
+                    tone = "warm"
+                    route = "games?tab=activities&id=" + aid
+                else:
+                    title = f"「{act.get('title') or aid}」进入「{act.get('current_stage') or '进行中'}」"
+                    subtitle = f"已有 {participants} 位群友参与 · 进度 {contribs}/{target}"
+                    tone = "info"
+                    route = "games?tab=activities&id=" + aid
+                events.append(
+                    {
+                        "id": f"act:{aid}",
+                        "category": "games",
+                        "source_label": "群间游戏",
+                        "tone": tone,
+                        "occurred_at": self._iso_time(
+                            float(act.get("updated_at") or act.get("created_at") or 0)
+                        ),
+                        "title": title,
+                        "subtitle": subtitle,
+                        "target_plugin": PLUGIN_ID,
+                        "target_route": route,
+                        "target_id": aid,
+                    }
+                )
+            return events[:cap]
+        except Exception:
+            return []
 
     # ------------------------------------------------------------------
     # LLM Tools (Group Activity Awareness)
@@ -498,6 +793,32 @@ class DynamicsGamesPlugin(Star):
         label = MODULE_LABEL_MAP.get(key, key)
         return event.plain_result(f"「{label}」模块当前已在群间游戏控制台关闭。")
 
+    def _guard_engine(
+        self, event: AstrMessageEvent, key: str
+    ) -> tuple[Any | None, Any | None]:
+        """Return ``(engine, None)`` when ready and enabled, else ``(None, optional_reply)``.
+
+        When legacy standalone game plugins put Dynamics Games into standby mode,
+        return silently for the conflicting engine (so the legacy plugin handles the
+        command without duplicate replies) and return a friendly standby notice for
+        other engines instead of raising ``KeyError`` on an empty ``self.engines``.
+        """
+        if self._legacy_conflicts:
+            if LEGACY_ENGINE_PLUGIN_MAP.get(key) in self._legacy_conflicts:
+                return None, None
+            conflicts = "、".join(self._legacy_conflicts)
+            return None, event.plain_result(
+                f"群间游戏当前因检测到旧版独立插件（{conflicts}）处于待机模式，停用旧插件并重载后即可启用。"
+            )
+        if not self._ready or self._closed:
+            return None, event.plain_result("群间游戏尚未就绪，请稍后再试。")
+        if not self.module_enabled(key):
+            return None, self._disabled_reply(event, key)
+        eng = self.engines.get(key)
+        if eng is None:
+            return None, event.plain_result("群间游戏尚未就绪，请稍后再试。")
+        return eng, None
+
     # ------------------------------------------------------------------
     # Engine 1: 真心话 (truth_game)
     # ------------------------------------------------------------------
@@ -505,95 +826,113 @@ class DynamicsGamesPlugin(Star):
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def tg_create(self, event: AstrMessageEvent):
         """创建真心话房间"""
-        if not self.module_enabled("truth_game"):
-            yield self._disabled_reply(event, "truth_game")
+        eng, reply = self._guard_engine(event, "truth_game")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["truth_game"].cmd_room_create(event):
+        async for r in eng.cmd_room_create(event):
             yield r
 
     @filter.command("报名真心话", alias=["truth_join", "加入真心话"])
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def tg_join(self, event: AstrMessageEvent):
         """加入真心话房间"""
-        if not self.module_enabled("truth_game"):
-            yield self._disabled_reply(event, "truth_game")
+        eng, reply = self._guard_engine(event, "truth_game")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["truth_game"].cmd_room_join(event):
+        async for r in eng.cmd_room_join(event):
             yield r
 
     @filter.command("开始真心话", alias=["truth_start"])
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def tg_start(self, event: AstrMessageEvent):
         """开始真心话对局"""
-        if not self.module_enabled("truth_game"):
-            yield self._disabled_reply(event, "truth_game")
+        eng, reply = self._guard_engine(event, "truth_game")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["truth_game"].cmd_game_start(event):
+        async for r in eng.cmd_game_start(event):
             yield r
 
     @filter.command("下一题", alias=["truth_next"])
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def tg_next(self, event: AstrMessageEvent):
         """推进真心话下一题"""
-        if not self.module_enabled("truth_game"):
-            yield self._disabled_reply(event, "truth_game")
+        eng, reply = self._guard_engine(event, "truth_game")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["truth_game"].cmd_next_question(event):
+        async for r in eng.cmd_next_question(event):
             yield r
 
     @filter.command("跳过", alias=["truth_skip"])
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def tg_skip(self, event: AstrMessageEvent):
         """跳过当前真心话题目"""
-        if not self.module_enabled("truth_game"):
-            yield self._disabled_reply(event, "truth_game")
+        eng, reply = self._guard_engine(event, "truth_game")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["truth_game"].cmd_skip_question(event):
+        async for r in eng.cmd_skip_question(event):
             yield r
 
     @filter.command("退出真心话", alias=["truth_leave"])
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def tg_leave(self, event: AstrMessageEvent):
         """退出真心话房间"""
-        if not self.module_enabled("truth_game"):
-            yield self._disabled_reply(event, "truth_game")
+        eng, reply = self._guard_engine(event, "truth_game")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["truth_game"].cmd_room_leave(event):
+        async for r in eng.cmd_room_leave(event):
             yield r
 
     @filter.command("结束真心话", alias=["truth_end"])
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def tg_end(self, event: AstrMessageEvent):
         """结束真心话并生成总结"""
-        if not self.module_enabled("truth_game"):
-            yield self._disabled_reply(event, "truth_game")
+        eng, reply = self._guard_engine(event, "truth_game")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["truth_game"].cmd_room_end(event):
+        async for r in eng.cmd_room_end(event):
             yield r
 
     @filter.command("真心话状态", alias=["truth_status"])
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def tg_status(self, event: AstrMessageEvent):
         """查看真心话房间状态"""
-        if not self.module_enabled("truth_game"):
-            yield self._disabled_reply(event, "truth_game")
+        eng, reply = self._guard_engine(event, "truth_game")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["truth_game"].cmd_room_status(event):
+        async for r in eng.cmd_room_status(event):
             yield r
 
     @filter.command("真心话帮助", alias=["truth_help", "真心话规则"])
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def tg_help(self, event: AstrMessageEvent):
         """查看真心话帮助"""
-        if not self.module_enabled("truth_game"):
-            yield self._disabled_reply(event, "truth_game")
+        eng, reply = self._guard_engine(event, "truth_game")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["truth_game"].cmd_help(event):
+        async for r in eng.cmd_help(event):
             yield r
 
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def tg_on_group_message(self, event: AstrMessageEvent):
-        if not self._ready or not self.module_enabled("truth_game"):
+        if not self._ready or self._closed or not self.module_enabled("truth_game"):
             return
         eng = self.engines.get("truth_game")
         if eng is not None:
@@ -606,73 +945,89 @@ class DynamicsGamesPlugin(Star):
     @filter.command("21点帮助", alias={"blackjack_help", "21点规则", "帮助21点"})
     async def bj_help(self, event: AstrMessageEvent):
         """查看21点规则"""
-        if not self.module_enabled("blackjack21"):
-            yield self._disabled_reply(event, "blackjack21")
+        eng, reply = self._guard_engine(event, "blackjack21")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["blackjack21"].cmd_help(event):
+        async for r in eng.cmd_help(event):
             yield r
 
     @filter.command("创建21点", alias={"blackjack_start", "开21点", "开房间21点"})
     async def bj_open(self, event: AstrMessageEvent):
         """创建21点房间"""
-        if not self.module_enabled("blackjack21"):
-            yield self._disabled_reply(event, "blackjack21")
+        eng, reply = self._guard_engine(event, "blackjack21")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["blackjack21"].cmd_open(event):
+        async for r in eng.cmd_open(event):
             yield r
 
     @filter.command("加入21点", alias={"blackjack_join", "加入21"})
     async def bj_join(self, event: AstrMessageEvent):
         """加入21点房间"""
-        if not self.module_enabled("blackjack21"):
-            yield self._disabled_reply(event, "blackjack21")
+        eng, reply = self._guard_engine(event, "blackjack21")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["blackjack21"].cmd_join(event):
+        async for r in eng.cmd_join(event):
             yield r
 
     @filter.command("开始21点", alias={"blackjack_go", "启动21点游戏", "开打21点"})
     async def bj_deal(self, event: AstrMessageEvent):
         """开始21点对局"""
-        if not self.module_enabled("blackjack21"):
-            yield self._disabled_reply(event, "blackjack21")
+        eng, reply = self._guard_engine(event, "blackjack21")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["blackjack21"].cmd_deal(event):
+        async for r in eng.cmd_deal(event):
             yield r
 
     @filter.command("要牌", alias={"blackjack_hit", "21点要牌"})
     async def bj_hit(self, event: AstrMessageEvent):
         """21点要牌"""
-        if not self.module_enabled("blackjack21"):
-            yield self._disabled_reply(event, "blackjack21")
+        eng, reply = self._guard_engine(event, "blackjack21")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["blackjack21"].cmd_hit(event):
+        async for r in eng.cmd_hit(event):
             yield r
 
     @filter.command("停牌", alias={"blackjack_stand", "21点停牌", "不再要了"})
     async def bj_stand(self, event: AstrMessageEvent):
         """21点停牌"""
-        if not self.module_enabled("blackjack21"):
-            yield self._disabled_reply(event, "blackjack21")
+        eng, reply = self._guard_engine(event, "blackjack21")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["blackjack21"].cmd_stand(event):
+        async for r in eng.cmd_stand(event):
             yield r
 
     @filter.command("21点状态", alias={"blackjack_status", "对局状态"})
     async def bj_status(self, event: AstrMessageEvent):
         """查看21点状态"""
-        if not self.module_enabled("blackjack21"):
-            yield self._disabled_reply(event, "blackjack21")
+        eng, reply = self._guard_engine(event, "blackjack21")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["blackjack21"].cmd_status(event):
+        async for r in eng.cmd_status(event):
             yield r
 
     @filter.command("结束21点", alias={"blackjack_end", "解散21点"})
     async def bj_end(self, event: AstrMessageEvent):
         """结束21点房间"""
-        if not self.module_enabled("blackjack21"):
-            yield self._disabled_reply(event, "blackjack21")
+        eng, reply = self._guard_engine(event, "blackjack21")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["blackjack21"].cmd_end(event):
+        async for r in eng.cmd_end(event):
             yield r
 
     # ------------------------------------------------------------------
@@ -681,16 +1036,20 @@ class DynamicsGamesPlugin(Star):
     @filter.command(ROLLPIG_CMD, alias=ROLLPIG_ALIASES)
     async def rp_roll_pig(self, event: AstrMessageEvent):
         """抽取今日小猪"""
-        if not self.module_enabled("rollpig"):
-            yield self._disabled_reply(event, "rollpig")
+        eng, reply = self._guard_engine(event, "rollpig")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        await self.engines["rollpig"].roll_pig(event)
+        await eng.roll_pig(event)
 
     @filter.regex(ROLLPIG_WAKE_FREE_PATTERN)
     async def rp_roll_pig_wake_free(self, event: AstrMessageEvent):
-        if not self._ready or not self.module_enabled("rollpig"):
+        if not self._ready or self._closed or not self.module_enabled("rollpig"):
             return
-        await self.engines["rollpig"].roll_pig_wake_free(event)
+        eng = self.engines.get("rollpig")
+        if eng is not None:
+            await eng.roll_pig_wake_free(event)
 
     # ------------------------------------------------------------------
     # Engine 4: 是啊，吃什么 (what_to_eat)
@@ -698,51 +1057,61 @@ class DynamicsGamesPlugin(Star):
     @filter.command("口味", alias=["我的口味", "口味档案"])
     async def wte_taste_show(self, event: AstrMessageEvent):
         """查看自己的口味档案"""
-        if not self.module_enabled("what_to_eat"):
-            yield self._disabled_reply(event, "what_to_eat")
+        eng, reply = self._guard_engine(event, "what_to_eat")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["what_to_eat"].cmd_taste_show(event):
+        async for r in eng.cmd_taste_show(event):
             yield r
 
     @filter.command("喜欢吃", alias=["爱吃"])
     async def wte_taste_like(self, event: AstrMessageEvent):
         """记录喜欢的口味/菜"""
-        if not self.module_enabled("what_to_eat"):
-            yield self._disabled_reply(event, "what_to_eat")
+        eng, reply = self._guard_engine(event, "what_to_eat")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["what_to_eat"].cmd_taste_like(event):
+        async for r in eng.cmd_taste_like(event):
             yield r
 
     @filter.command("不吃", alias=["不喜欢", "忌口"])
     async def wte_taste_dislike(self, event: AstrMessageEvent):
         """记录忌口"""
-        if not self.module_enabled("what_to_eat"):
-            yield self._disabled_reply(event, "what_to_eat")
+        eng, reply = self._guard_engine(event, "what_to_eat")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["what_to_eat"].cmd_taste_dislike(event):
+        async for r in eng.cmd_taste_dislike(event):
             yield r
 
     @filter.command("过敏")
     async def wte_taste_allergy(self, event: AstrMessageEvent):
         """记录过敏原"""
-        if not self.module_enabled("what_to_eat"):
-            yield self._disabled_reply(event, "what_to_eat")
+        eng, reply = self._guard_engine(event, "what_to_eat")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["what_to_eat"].cmd_taste_allergy(event):
+        async for r in eng.cmd_taste_allergy(event):
             yield r
 
     @filter.command("清空口味", alias=["重置口味"])
     async def wte_taste_clear(self, event: AstrMessageEvent):
         """清空口味档案"""
-        if not self.module_enabled("what_to_eat"):
-            yield self._disabled_reply(event, "what_to_eat")
+        eng, reply = self._guard_engine(event, "what_to_eat")
+        if eng is None:
+            if reply is not None:
+                yield reply
             return
-        async for r in self.engines["what_to_eat"].cmd_taste_clear(event):
+        async for r in eng.cmd_taste_clear(event):
             yield r
 
     @filter.event_message_type(EventMessageType.ALL)
     async def wte_on_message(self, event: AstrMessageEvent, *args, **kwargs):
-        if not self._ready or not self.module_enabled("what_to_eat"):
+        if not self._ready or self._closed or not self.module_enabled("what_to_eat"):
             return
         eng = self.engines.get("what_to_eat")
         if eng is not None:
