@@ -6,6 +6,38 @@ from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
 
+try:
+    from ...series_panels import (
+        is_provider_budget_busy_error,
+        resolve_series_provider,
+        series_llm_call,
+    )
+except Exception:  # pragma: no cover - standalone fallback
+    def is_provider_budget_busy_error(_exc: BaseException | None) -> bool:
+        return False
+
+    def resolve_series_provider(
+        _context: Any,
+        explicit_provider: str = "",
+        fallback_provider: str = "",
+        *,
+        role: str = "reply",
+    ) -> str:
+        _ = role
+        return str(explicit_provider or "").strip() or str(fallback_provider or "").strip()
+
+    async def series_llm_call(
+        _context: Any,
+        _provider_id: str,
+        _plugin_id: str,
+        _purpose: str,
+        invoke: Any,
+        *,
+        acquire_timeout: float | None = 15.0,
+    ) -> Any:
+        _ = acquire_timeout
+        return await invoke()
+
 if TYPE_CHECKING:
     from astrbot.api.star import Context
 
@@ -168,30 +200,42 @@ class PersonaLLMResponder:
                 return None
 
             system_prompt = await self.resolve_system_prompt(umo)
-            llm_resp = await self.context.llm_generate(
-                chat_provider_id=provider_id,
-                prompt=prompt,
-                system_prompt=system_prompt,
+            llm_resp = await series_llm_call(
+                self.context,
+                provider_id,
+                "astrbot_plugin_dynamics_games",
+                "games_what_to_eat",
+                lambda: self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                ),
             )
             text = self._extract_text(llm_resp)
             if not text:
                 logger.warning("吃什么插件：LLM 返回空内容，回退模板回复")
                 return None
             return text
-        except Exception:
+        except Exception as exc:
+            if is_provider_budget_busy_error(exc):
+                logger.warning("吃什么插件：共享模型队列繁忙，回退模板回复")
+                return None
             logger.exception("吃什么插件：LLM 生成失败，回退模板回复")
             return None
 
     async def _resolve_provider_id(self, umo: str | None) -> str | None:
-        if self.provider_id:
+        preferred = resolve_series_provider(
+            self.context, self.provider_id, role="reply"
+        )
+        if preferred:
             # 校验配置的 provider 是否存在
             try:
-                prov = self.context.get_provider_by_id(self.provider_id)
+                prov = self.context.get_provider_by_id(preferred)
                 if prov is not None:
-                    return self.provider_id
+                    return preferred
                 logger.warning(
                     "吃什么插件：配置的 provider 不存在: %s，尝试会话默认",
-                    self.provider_id,
+                    preferred,
                 )
             except Exception as e:
                 logger.warning("吃什么插件：校验 provider 失败: %s", e)

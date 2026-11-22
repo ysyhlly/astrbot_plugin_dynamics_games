@@ -1,5 +1,11 @@
 # 更新日志
 
+## v0.1.1-rc.6 — 2026-11-22
+
+- 接入全系列共享 `ProviderBudget` 并发池与遥测上报（覆盖「今天吃什么」`persona_llm.py` 与「真心话」`llm_call.py`）。
+- 下沉主控共享配置（SSOT）：统一解析共享时区（含今日小猪与活动日边界）、默认模型 `reply_provider` 兜底与 `exclude_groups` 排除护栏，单装无主控时保持独立运行。
+- 同步按语言拆包的 `series-messages.js` 轻加载器（`series-messages-{en,ja,ru}.js` 按需懒加载）及统一 `series_panels.py`。
+
 ## v0.1.1-rc.5 — 2026-11-21
 
 - 群间系列面板 v2：新增只读联邦搜索、群控矩阵状态、今日生活手账事件与系列摘要脉冲，同步共享 UI Kit（二级面板路径、跨插件记录定位与清空竞态修复）。

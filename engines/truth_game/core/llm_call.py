@@ -39,6 +39,38 @@ from typing import Any
 
 from astrbot.api import logger
 
+try:
+    from ....series_panels import (
+        is_provider_budget_busy_error,
+        resolve_series_provider,
+        series_llm_call,
+    )
+except Exception:  # pragma: no cover - standalone fallback
+    def is_provider_budget_busy_error(_exc: BaseException | None) -> bool:
+        return False
+
+    def resolve_series_provider(
+        _context: Any,
+        explicit_provider: str = "",
+        fallback_provider: str = "",
+        *,
+        role: str = "reply",
+    ) -> str:
+        _ = role
+        return str(explicit_provider or "").strip() or str(fallback_provider or "").strip()
+
+    async def series_llm_call(
+        _context: Any,
+        _provider_id: str,
+        _plugin_id: str,
+        _purpose: str,
+        invoke: Any,
+        *,
+        acquire_timeout: float | None = 15.0,
+    ) -> Any:
+        _ = acquire_timeout
+        return await invoke()
+
 #: Whole-sequence retry budget: first attempt + one fast-failure retry.
 _SEQUENCE_ATTEMPTS = 2
 
@@ -81,7 +113,7 @@ async def call_llm(
         LLMUnavailableError: every path failed (after at most one fast-failure
             retry), or a step timed out (no retry in that case).
     """
-    configured = (provider_id or "").strip() or None
+    configured = resolve_series_provider(context, provider_id or "", role="reply") or None
     last_failure: Exception | None = None
 
     for attempt in range(1, _SEQUENCE_ATTEMPTS + 1):
@@ -109,6 +141,13 @@ async def call_llm(
                 )
                 continue
             break
+        except Exception as exc:
+            if is_provider_budget_busy_error(exc):
+                logger.warning(
+                    f"[llm_call] 共享模型队列繁忙，放弃重试并降级: {exc}"
+                )
+                raise LLMUnavailableError("共享模型队列繁忙，已降级处理") from exc
+            raise
         # Non-empty text returned — success.
         return text
 
@@ -139,7 +178,12 @@ async def _run_sequence(
             return text
         provider = _provider_by_id(context, configured_id)
         text = await _step_text_chat(
-            provider, prompt, system_prompt, llm_timeout_seconds
+            provider,
+            prompt,
+            system_prompt,
+            llm_timeout_seconds,
+            context=context,
+            provider_id=configured_id,
         )
         if text is not None:
             logger.info(f"[llm_call] 成功: 配置 Provider (text_chat) '{configured_id}'")
@@ -157,7 +201,14 @@ async def _run_sequence(
 
     # -- Step 3: provider currently in use (old API) --------------------
     provider = _using_provider(context, umo)
-    text = await _step_text_chat(provider, prompt, system_prompt, llm_timeout_seconds)
+    text = await _step_text_chat(
+        provider,
+        prompt,
+        system_prompt,
+        llm_timeout_seconds,
+        context=context,
+        provider_id=_provider_label(provider),
+    )
     if text is not None:
         logger.info("[llm_call] 成功: 回退 Provider (get_using_provider)")
         return text
@@ -171,6 +222,23 @@ async def _run_sequence(
 # ---------------------------------------------------------------------------
 
 
+def _provider_label(provider: Any) -> str:
+    if provider is None:
+        return "default"
+    meta = getattr(provider, "meta", None)
+    if callable(meta):
+        try:
+            meta = meta()
+        except Exception:
+            meta = None
+    pid = (
+        (getattr(meta, "id", None) if meta is not None else None)
+        or getattr(provider, "provider_id", None)
+        or getattr(provider, "id", None)
+    )
+    return str(pid or "").strip() or "default"
+
+
 async def _step_llm_generate(
     context: Any,
     provider_id: str,
@@ -181,22 +249,33 @@ async def _step_llm_generate(
     """New unified API: ``context.llm_generate(...)`` under wait_for.
 
     Returns None on any fast failure (missing method / exception / empty
-    result); re-raises ``asyncio.TimeoutError`` (never treated as a step
-    failure, so it reaches the no-retry path in ``call_llm``).
+    result); re-raises ``asyncio.TimeoutError`` and ``ProviderBudgetBusyError``
+    so they reach the no-retry path in ``call_llm``.
     """
     llm_generate = getattr(context, "llm_generate", None)
     if not callable(llm_generate):
         return None
     try:
-        coro = llm_generate(
-            chat_provider_id=provider_id,
-            prompt=prompt,
-            system_prompt=system_prompt,
+        resp = await series_llm_call(
+            context,
+            provider_id,
+            "astrbot_plugin_dynamics_games",
+            "games_truth_game",
+            lambda: asyncio.wait_for(
+                llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                ),
+                timeout=llm_timeout_seconds,
+            ),
+            acquire_timeout=min(15.0, float(llm_timeout_seconds)),
         )
-        resp = await asyncio.wait_for(coro, timeout=llm_timeout_seconds)
     except asyncio.TimeoutError:
         raise
     except Exception as exc:  # noqa: BLE001 - degraded providers raise freely
+        if is_provider_budget_busy_error(exc):
+            raise
         logger.warning(f"[llm_call] llm_generate 失败: {exc}")
         return None
     return _extract_text(resp)
@@ -207,10 +286,14 @@ async def _step_text_chat(
     prompt: str,
     system_prompt: str | None,
     llm_timeout_seconds: float,
+    *,
+    context: Any = None,
+    provider_id: str = "",
 ) -> str | None:
     """Old API: ``provider.text_chat(prompt=..., system_prompt=...)`` under wait_for.
 
-    Returns None on any fast failure; re-raises ``asyncio.TimeoutError``.
+    Returns None on any fast failure; re-raises ``asyncio.TimeoutError`` and
+    ``ProviderBudgetBusyError``.
     """
     if provider is None:
         return None
@@ -218,11 +301,22 @@ async def _step_text_chat(
     if not callable(text_chat):
         return None
     try:
-        coro = text_chat(prompt=prompt, system_prompt=system_prompt)
-        resp = await asyncio.wait_for(coro, timeout=llm_timeout_seconds)
+        resp = await series_llm_call(
+            context,
+            provider_id or _provider_label(provider),
+            "astrbot_plugin_dynamics_games",
+            "games_truth_game",
+            lambda: asyncio.wait_for(
+                text_chat(prompt=prompt, system_prompt=system_prompt),
+                timeout=llm_timeout_seconds,
+            ),
+            acquire_timeout=min(15.0, float(llm_timeout_seconds)),
+        )
     except asyncio.TimeoutError:
         raise
     except Exception as exc:  # noqa: BLE001
+        if is_provider_budget_busy_error(exc):
+            raise
         logger.warning(f"[llm_call] text_chat 失败: {exc}")
         return None
     return _extract_text(resp)

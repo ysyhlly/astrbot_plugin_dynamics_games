@@ -13,7 +13,7 @@ ensure_current(
         ("core.coordinator", "ActivityCoordinator", "sync_outcome_records"),
         ("core.store", "ActivityStore", "save_completion"),
     ],
-    version="0.1.1-rc.5",
+    version="0.1.1-rc.6",
 )
 
 import asyncio
@@ -84,7 +84,7 @@ LEGACY_ENGINE_PLUGIN_MAP: dict[str, str] = {
 class DynamicsGamesPlugin(Star):
     """群间游戏：组织共读、游戏约局、接龙创作、小型挑战、共同制作作品与群聊娱乐引擎总成。"""
 
-    VERSION = "0.1.1-rc.5"
+    VERSION = "0.1.1-rc.6"
     name = PLUGIN_ID
     author = "ysyhlly"
     plugin_id = f"ysyhlly/{PLUGIN_ID}"
@@ -264,20 +264,41 @@ class DynamicsGamesPlugin(Star):
     def _tz_shanghai() -> timezone:
         return timezone(timedelta(hours=8))
 
+    def _series_tz(self):
+        return series_panels.resolve_series_timezone(getattr(self, "context", None))
+
+    def _is_event_excluded_by_core(self, event: AstrMessageEvent | None) -> bool:
+        if event is None:
+            return False
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        get_gid = getattr(event, "get_group_id", None)
+        gid = ""
+        if callable(get_gid):
+            try:
+                gid = str(get_gid() or "").strip()
+            except Exception:
+                gid = ""
+        if not gid:
+            gid = str(getattr(event, "group_id", "") or "").strip()
+        return series_panels.is_series_group_excluded(
+            getattr(self, "context", None), umo=umo, group_id=gid
+        )
+
     @classmethod
-    def _iso_time(cls, ts: float | None = None) -> str:
+    def _iso_time(cls, ts: float | None = None, *, tz=None) -> str:
+        eff_tz = tz or cls._tz_shanghai()
         dt = (
-            datetime.fromtimestamp(float(ts), tz=cls._tz_shanghai())
+            datetime.fromtimestamp(float(ts), tz=eff_tz)
             if ts is not None
-            else datetime.now(tz=cls._tz_shanghai())
+            else datetime.now(tz=eff_tz)
         )
         return dt.isoformat(timespec="seconds")
 
     @classmethod
-    def _date_window(cls, date_str: str = "today") -> tuple[float, float]:
-        tz = cls._tz_shanghai()
+    def _date_window(cls, date_str: str = "today", *, tz=None) -> tuple[float, float]:
+        eff_tz = tz or cls._tz_shanghai()
         raw = str(date_str or "today").strip().lower()
-        now = datetime.now(tz=tz)
+        now = datetime.now(tz=eff_tz)
         if not raw or raw == "today":
             start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         elif raw == "yesterday":
@@ -286,7 +307,7 @@ class DynamicsGamesPlugin(Star):
             )
         else:
             try:
-                parsed = datetime.strptime(raw[:10], "%Y-%m-%d").replace(tzinfo=tz)
+                parsed = datetime.strptime(raw[:10], "%Y-%m-%d").replace(tzinfo=eff_tz)
                 start = parsed
             except ValueError:
                 start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -295,7 +316,7 @@ class DynamicsGamesPlugin(Star):
 
     def get_series_summary(self) -> dict[str, Any]:
         """Synchronous, read-only v2 series summary for presence badge/pulse."""
-        now_iso = self._iso_time()
+        now_iso = self._iso_time(tz=self._series_tz())
         try:
             if self._legacy_conflicts:
                 cnt = len(self._legacy_conflicts)
@@ -375,8 +396,25 @@ class DynamicsGamesPlugin(Star):
             stats = self.store.stats_summary(target)
             open_cnt = int(stats.get("open_activities") or 0)
             completed_cnt = int(stats.get("completed_activities") or 0)
-            since_ts, _ = self._date_window("today")
+            tz = self._series_tz()
+            since_ts, _ = self._date_window("today", tz=tz)
             today_cnt = self.store.activity_count_since(since_ts, umo=target)
+            excluded_by_core = bool(
+                target
+                and series_panels.is_series_group_excluded(
+                    getattr(self, "context", None), umo=target
+                )
+            )
+            if excluded_by_core:
+                return {
+                    "enabled": False,
+                    "supported": False,
+                    "excluded_by_core": True,
+                    "persona_id": "",
+                    "activity_today": today_cnt,
+                    "summary": "主控排除（群间游戏被动触发已静默）",
+                    "version": f"0:{open_cnt}:{completed_cnt}",
+                }
             summary = (
                 f"{open_cnt} 项进行中 · {completed_cnt} 份成果"
                 if enabled
@@ -385,6 +423,7 @@ class DynamicsGamesPlugin(Star):
             return {
                 "enabled": enabled,
                 "supported": True,
+                "excluded_by_core": False,
                 "persona_id": "",
                 "activity_today": today_cnt,
                 "summary": summary,
@@ -499,7 +538,8 @@ class DynamicsGamesPlugin(Star):
             return []
         cap = max(1, min(50, int(limit or 20)))
         try:
-            since_ts, until_ts = self._date_window(date)
+            tz = self._series_tz()
+            since_ts, until_ts = self._date_window(date, tz=tz)
             rows = self.store.recent_journal_rows(
                 since_ts=since_ts,
                 until_ts=until_ts,
@@ -535,7 +575,8 @@ class DynamicsGamesPlugin(Star):
                         "source_label": "群间游戏",
                         "tone": tone,
                         "occurred_at": self._iso_time(
-                            float(act.get("updated_at") or act.get("created_at") or 0)
+                            float(act.get("updated_at") or act.get("created_at") or 0),
+                            tz=tz,
                         ),
                         "title": title,
                         "subtitle": subtitle,
@@ -1045,7 +1086,12 @@ class DynamicsGamesPlugin(Star):
 
     @filter.regex(ROLLPIG_WAKE_FREE_PATTERN)
     async def rp_roll_pig_wake_free(self, event: AstrMessageEvent):
-        if not self._ready or self._closed or not self.module_enabled("rollpig"):
+        if (
+            not self._ready
+            or self._closed
+            or not self.module_enabled("rollpig")
+            or self._is_event_excluded_by_core(event)
+        ):
             return
         eng = self.engines.get("rollpig")
         if eng is not None:
@@ -1111,7 +1157,12 @@ class DynamicsGamesPlugin(Star):
 
     @filter.event_message_type(EventMessageType.ALL)
     async def wte_on_message(self, event: AstrMessageEvent, *args, **kwargs):
-        if not self._ready or self._closed or not self.module_enabled("what_to_eat"):
+        if (
+            not self._ready
+            or self._closed
+            or not self.module_enabled("what_to_eat")
+            or self._is_event_excluded_by_core(event)
+        ):
             return
         eng = self.engines.get("what_to_eat")
         if eng is not None:

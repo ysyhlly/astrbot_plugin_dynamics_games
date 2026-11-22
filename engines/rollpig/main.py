@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import datetime
 from pathlib import Path
 
 from astrbot.api.event import AstrMessageEvent
@@ -9,6 +10,7 @@ from astrbot.api.star import Context, StarTools
 from astrbot.core import AstrBotConfig
 
 from ...runtime import Component
+from ...series_panels import resolve_series_timezone
 from .rollpig.adapter import AtTargetResolver, PigPresenter
 from .rollpig.config import PluginSettings
 from .rollpig.messages import CATALOG_UNAVAILABLE
@@ -76,6 +78,7 @@ class RollPigPlugin(Component):
         self.service = RollPigService(
             BoardStore(data_dir / DATA_FILE_NAME, self.logger),
             self.repository,
+            clock=lambda: datetime.now(resolve_series_timezone(context)).date(),
         )
         self.presenter = PigPresenter(self.settings, self.logger)
         self.targeting = AtTargetResolver(self.settings)
