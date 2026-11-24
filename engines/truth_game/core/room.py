@@ -97,12 +97,19 @@ class Room:
     #: LLM/LM calls in T10's flow hook). Empty until ``cmd_create`` stores it;
     #: the flow falls back to ``"group:{group_id}"`` when absent.
     umo: str = ""
+    #: Adapter-aware full session room key (defaults to ``umo`` or ``group_id``).
+    room_key: str = ""
     #: Round sub-state (v2): ``""`` | ``awaiting_asker_mode`` |
     #: ``awaiting_asker_question`` | ``question_out``.
     round_stage: str = ""
     room_id: str = field(default_factory=lambda: uuid4().hex)
     participants: dict[str, str] = field(default_factory=dict)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+
+    def __post_init__(self) -> None:
+        self.group_id = str(self.group_id or "").strip()
+        self.umo = str(self.umo or "").strip()
+        self.room_key = str(self.room_key or "").strip() or self.umo or self.group_id
 
 
 class RoomManager:
@@ -118,10 +125,11 @@ class RoomManager:
     - ``_waiting_check_interval`` (1.0) — internal knob, tests shorten it
     """
 
-    def __init__(self, config: dict | None = None) -> None:
+    def __init__(self, config: dict | None = None, *, context: Any = None) -> None:
         self._config: dict = dict(config or {})
         # Public alias for command layer / main (complete_and_announce max_questions).
         self.config: dict = self._config
+        self.context: Any = context
         self.rooms: dict[str, Room] = {}
         self._waiting_tasks: dict[str, asyncio.Task] = {}
         self._idle_tasks: dict[str, asyncio.Task] = {}
@@ -182,41 +190,90 @@ class RoomManager:
         # T2 may add the config key in parallel; default 60 when absent.
         return self._cfg_float("asker_choice_timeout_seconds", 60.0)
 
+    # ------------------------------------------------------------ room lookup
+    def _lookup_room(
+        self, group_id: str, *, umo: str = ""
+    ) -> tuple[str | None, Room | None]:
+        """Resolve ``(room_key, room)`` preferring full ``umo`` with legacy ``group_id`` fallback."""
+        clean_umo = str(umo or "").strip()
+        clean_key = str(group_id or "").strip()
+        if clean_umo:
+            room = self.rooms.get(clean_umo)
+            if room is not None:
+                return clean_umo, room
+            if clean_key and clean_key != clean_umo:
+                legacy = self.rooms.get(clean_key)
+                if legacy is not None and (not legacy.umo or legacy.umo == clean_umo):
+                    return clean_key, legacy
+            return None, None
+        if not clean_key:
+            return None, None
+        room = self.rooms.get(clean_key)
+        if room is not None:
+            return clean_key, room
+        # Legacy compatibility: bare group_id lookup when unambiguous
+        if ":" not in clean_key:
+            matches = [
+                (rkey, r) for rkey, r in self.rooms.items() if r.group_id == clean_key
+            ]
+            if len(matches) == 1:
+                return matches[0]
+        return None, None
+
+    def get_room(self, group_id: str, *, umo: str = "") -> Room | None:
+        """Public lookup helper supporting both full UMO and legacy bare group_id."""
+        return self._lookup_room(group_id, umo=umo)[1]
+
     # ------------------------------------------------------------ sync methods
     def create(
-        self, group_id: str, host_id: str, host_name: str, bot: Any = None
+        self,
+        group_id: str,
+        host_id: str,
+        host_name: str,
+        bot: Any = None,
+        *,
+        umo: str = "",
     ) -> tuple[bool, str]:
         """Open a room with the host auto-joined as a player.
 
         FULLY SYNCHRONOUS (no awaits) and therefore atomic in the event loop —
         it needs no lock and cannot interleave. Rejects (with a friendly reason)
         when a room with ``phase in ("waiting", "playing")`` already exists for
-        the group. Arms the waiting timer on success.
+        the session. Arms the waiting timer on success.
 
         Returns ``(True, "")`` or ``(False, reason)``.
         """
-        if not group_id:
+        clean_umo = str(umo or "").strip()
+        clean_gid = str(group_id or "").strip()
+        if not clean_gid and ":" in clean_umo:
+            clean_gid = clean_umo.rsplit(":", 1)[-1].strip()
+        if not clean_gid and not clean_umo:
             return (False, "缺少群信息，无法创建房间。")
-        existing = self.rooms.get(group_id)
+        room_key = clean_umo or clean_gid
+        existing = self.rooms.get(room_key)
         if existing is not None:
             if existing.phase == "settled":
                 return (False, "上局已结束，成果仍在保存，请稍后开局。")
             return (False, "本群已经有真心话房间了，请直接发送 报名真心话 加入。")
         now = time.time()
         room = Room(
-            group_id=group_id,
+            group_id=clean_gid or room_key,
             host_id=host_id,
             created_at=now,
             last_action_at=now,
             bot=bot,
+            umo=clean_umo,
+            room_key=room_key,
         )
         room.players[host_id] = Player(user_id=host_id, nickname=host_name)
         room.participants[host_id] = host_name
-        self.rooms[group_id] = room
+        self.rooms[room_key] = room
         self._arm_waiting_timer(room)
         return (True, "")
 
-    def join(self, group_id: str, user_id: str, nickname: str) -> tuple[bool, str]:
+    def join(
+        self, group_id: str, user_id: str, nickname: str, *, umo: str = ""
+    ) -> tuple[bool, str]:
         """Join a waiting or playing room. SYNCHRONOUS (atomic; no lock).
 
         Mid-game join (v2): allowed when ``phase=="playing"`` — the new player
@@ -226,7 +283,7 @@ class RoomManager:
 
         Returns ``(True, "")`` or ``(False, reason)``.
         """
-        room = self.rooms.get(group_id)
+        _rkey, room = self._lookup_room(group_id, umo=umo)
         if room is None:
             return (False, "本群还没有真心话房间，请先发送 真心话 创建。")
         if room.phase not in ("waiting", "playing"):
@@ -241,13 +298,15 @@ class RoomManager:
         room.last_action_at = time.time()
         return (True, "")
 
-    def status(self, group_id: str) -> dict | None:
+    def status(self, group_id: str, *, umo: str = "") -> dict | None:
         """Synchronous snapshot for display (no lock; torn reads acceptable)."""
-        room = self.rooms.get(group_id)
+        _rkey, room = self._lookup_room(group_id, umo=umo)
         if room is None:
             return None
         return {
             "group_id": room.group_id,
+            "umo": room.umo,
+            "room_key": room.room_key,
             "phase": room.phase,
             "host_id": room.host_id,
             "players": [
@@ -264,7 +323,7 @@ class RoomManager:
 
     # ------------------------------------------------------------- locked ops
     async def start(
-        self, group_id: str, caller_id: str, is_admin: bool
+        self, group_id: str, caller_id: str, is_admin: bool, *, umo: str = ""
     ) -> tuple[bool, str]:
         """Start the game. LOCKED. Host-or-admin; already-playing rejected.
 
@@ -276,14 +335,14 @@ class RoomManager:
 
         Returns ``(True, display_text)`` or ``(False, reason)``.
         """
-        room = self.rooms.get(group_id)
-        if room is None:
+        rkey, room = self._lookup_room(group_id, umo=umo)
+        if room is None or rkey is None:
             return (False, "本群还没有真心话房间，请先发送 真心话 创建。")
         if caller_id != room.host_id and not is_admin:
             return (False, "只有房主或管理员可以开始游戏。")
         async with room._lock:
             # identity recheck: lock.acquire() is an await point
-            if self.rooms.get(group_id) is not room:
+            if self.rooms.get(rkey) is not room:
                 return (False, "房间状态已变化，请重试。")
             if room.phase == "settled":
                 return (False, "上局已结束，成果仍在保存。")
@@ -299,7 +358,7 @@ class RoomManager:
             room.phase = "playing"
             room.participants = {uid: player.nickname for uid, player in room.players.items()}
             room.started_at = time.time()
-            self._cancel_waiting_timer(group_id)
+            self._cancel_waiting_timer(rkey)
             self._arm_idle_timer(room)
             # Auto first advance still holding the lock (v2).
             return await self._do_advance(room)
@@ -310,6 +369,8 @@ class RoomManager:
         caller_id: str,
         is_admin: bool,
         by_human: bool = True,
+        *,
+        umo: str = "",
     ) -> tuple[bool, str]:
         """Advance one round. LOCKED. Only in ``playing``.
 
@@ -320,8 +381,8 @@ class RoomManager:
         ``"房间已结束"`` when the room vanished while the advance hook awaited
         — dropped silently, nothing announced).
         """
-        room = self.rooms.get(group_id)
-        if room is None:
+        rkey, room = self._lookup_room(group_id, umo=umo)
+        if room is None or rkey is None:
             return (False, "本群还没有进行中的真心话房间。")
         if room.phase != "playing":
             return (False, "游戏还未开始，请先发送 开始真心话。")
@@ -334,27 +395,27 @@ class RoomManager:
         cancelled_choice: asyncio.Task | None = None
         async with room._lock:
             # identity recheck after lock.acquire() (an await point)
-            if self.rooms.get(group_id) is not room:
+            if self.rooms.get(rkey) is not room:
                 return (False, "房间状态已变化，请重试。")
             if room.phase != "playing":
                 return (False, "游戏还未开始，请先发送 开始真心话。")
             if by_human:
                 room.idle_streak = 0
             # cancel BEFORE advance; await AFTER unlock (same as end())
-            cancelled_choice = self._cancel_choice_timer(group_id)
+            cancelled_choice = self._cancel_choice_timer(rkey)
             result = await self._do_advance(room)
         if cancelled_choice is not None:
             await asyncio.gather(cancelled_choice, return_exceptions=True)
         return result
 
     async def skip(
-        self, group_id: str, caller_id: str, is_admin: bool
+        self, group_id: str, caller_id: str, is_admin: bool, *, umo: str = ""
     ) -> tuple[bool, str]:
         """Alias of ``next`` with ``by_human=True`` (identical state change)."""
-        return await self.next(group_id, caller_id, is_admin, by_human=True)
+        return await self.next(group_id, caller_id, is_admin, by_human=True, umo=umo)
 
     async def leave(
-        self, group_id: str, user_id: str
+        self, group_id: str, user_id: str, *, umo: str = ""
     ) -> tuple[bool, dict]:
         """Leave the room. LOCKED. Any player in ``room.players`` may leave.
 
@@ -380,8 +441,8 @@ class RoomManager:
         ``new_host_id``, ``voided``, ``advance_text``, ``summary_text``,
         ``rounds``, ``ask_counts``.
         """
-        room = self.rooms.get(group_id)
-        if room is None:
+        rkey, room = self._lookup_room(group_id, umo=umo)
+        if room is None or rkey is None:
             return (False, {"error": "本群还没有真心话房间。"})
         if user_id not in room.players:
             return (False, {"error": "你不在真心话房间中，无需退出。"})
@@ -390,7 +451,7 @@ class RoomManager:
         payload: dict[str, Any] = {"left_id": user_id, "ended": False}
 
         async with room._lock:
-            if self.rooms.get(group_id) is not room:
+            if self.rooms.get(rkey) is not room:
                 return (False, {"error": "房间状态已变化，请重试。"})
             if room.phase == "settled":
                 return (False, {"error": "上局已结束，成果仍在保存。"})
@@ -431,7 +492,7 @@ class RoomManager:
                         # keep last asked_history entry (question was shown)
                     room.last_pair = None
                     room.round_stage = ""
-                    ct = self._cancel_choice_timer(group_id)
+                    ct = self._cancel_choice_timer(rkey)
                     if ct is not None:
                         cancelled.append(ct)
                     ok, text = await self._do_advance(room)
@@ -447,7 +508,7 @@ class RoomManager:
         return (True, payload)
 
     async def end(
-        self, group_id: str, caller_id: str, is_admin: bool
+        self, group_id: str, caller_id: str, is_admin: bool, *, umo: str = ""
     ) -> tuple[bool, dict]:
         """End the room. LOCKED. Host-or-admin.
 
@@ -456,12 +517,12 @@ class RoomManager:
         ``len(asked_history)`` falling back to ``advance_count`` — or
         ``(False, {"error": reason})`` (room persists on permission failure).
         """
-        room = self.rooms.get(group_id)
-        if room is None:
+        rkey, room = self._lookup_room(group_id, umo=umo)
+        if room is None or rkey is None:
             return (False, {"error": "本群还没有进行中的真心话房间。"})
         async with room._lock:
             # identity recheck after lock.acquire() (an await point)
-            if self.rooms.get(group_id) is not room:
+            if self.rooms.get(rkey) is not room:
                 return (False, {"error": "房间状态已变化，请重试。"})
             if caller_id != room.host_id and not is_admin:
                 return (False, {"error": "只有房主或管理员可以结束房间。"})
@@ -484,9 +545,13 @@ class RoomManager:
         return (True, summary)
 
     async def end_at_limit(self, room: Room, max_questions: int) -> dict | None:
+        rkey = room.room_key
         async with room._lock:
-            if (self.rooms.get(room.group_id) is not room or room.phase != "playing"
-                    or len(room.asked_history) < max_questions):
+            if (
+                self.rooms.get(rkey) is not room
+                or room.phase != "playing"
+                or len(room.asked_history) < max_questions
+            ):
                 return None
             summary, cancelled = self._settle_locked(room, "max_questions")
         if cancelled:
@@ -496,7 +561,8 @@ class RoomManager:
         return summary
 
     def _settle_locked(self, room: Room, reason: str) -> tuple[dict, list[asyncio.Task]]:
-        cancelled = self._cancel_room_timers(room.group_id)
+        rkey = room.room_key
+        cancelled = self._cancel_room_timers(rkey)
         summary = {
             "rounds": len(room.asked_history) or room.advance_count,
             "ask_counts": dict(room.ask_counts),
@@ -505,18 +571,27 @@ class RoomManager:
         participants = [
             {"uid": uid, "name": name} for uid, name in room.participants.items()
         ]
-        if (self.outcome_callback is not None and room.phase == "playing"
-                and ":GroupMessage:" in room.umo and summary["rounds"] > 0
-                and (len(participants) >= 2 or summary["rounds"] >= 2)):
+        if (
+            self.outcome_callback is not None
+            and room.phase == "playing"
+            and ":GroupMessage:" in room.umo
+            and summary["rounds"] > 0
+            and (len(participants) >= 2 or summary["rounds"] >= 2)
+        ):
             self._pending_outcomes[room.room_id] = {
-                **summary, "room_id": room.room_id, "umo": room.umo,
-                "group_id": room.group_id, "participants": participants,
-                "created_at": room.created_at, "occurred_at": time.time(),
+                **summary,
+                "room_id": room.room_id,
+                "umo": room.umo,
+                "group_id": room.group_id,
+                "room_key": rkey,
+                "participants": participants,
+                "created_at": room.created_at,
+                "occurred_at": time.time(),
                 "end_reason": reason,
             }
             room.phase = "settled"
         else:
-            self.rooms.pop(room.group_id, None)
+            self.rooms.pop(rkey, None)
         return summary, cancelled
 
     def _note_pending_outcome(self, room: Room, summary: dict) -> None:
@@ -534,10 +609,10 @@ class RoomManager:
                     logger.exception("Could not archive settled truth room %s", room_id)
                 else:
                     self._pending_outcomes.pop(room_id, None)
-                    group_id = outcome["group_id"]
-                    room = self.rooms.get(group_id)
+                    rkey = outcome.get("room_key") or outcome["group_id"]
+                    room = self.rooms.get(rkey)
                     if room and room.room_id == room_id:
-                        self.rooms.pop(group_id, None)
+                        self.rooms.pop(rkey, None)
 
     async def terminate(self) -> None:
         """Cancel ALL rooms' timer tasks (plugin unload path) and clear rooms."""
@@ -597,7 +672,7 @@ class RoomManager:
             room.last_askee_id = askee
         room.asked_history.append(question)
         room.round_stage = "question_out"
-        self._cancel_choice_timer(room.group_id)
+        self._cancel_choice_timer(room.room_key)
         return question
 
     def _submit_human_question(self, room: Room, text: str) -> str:
@@ -622,7 +697,7 @@ class RoomManager:
         return q
 
     async def choose_asker_mode(
-        self, group_id: str, caller_id: str, mode: str
+        self, group_id: str, caller_id: str, mode: str, *, umo: str = ""
     ) -> tuple[bool, str | None]:
         """Human asker picks self-question vs bot-question. LOCKED.
 
@@ -634,13 +709,13 @@ class RoomManager:
         * Resets ``idle_streak`` on success (human activity).
         * Wrong state / non-asker → ``(False, reason)``.
         """
-        room = self.rooms.get(group_id)
-        if room is None:
+        rkey, room = self._lookup_room(group_id, umo=umo)
+        if room is None or rkey is None:
             return (False, "房间状态已变化")
         cancelled_choice: asyncio.Task | None = None
         result: tuple[bool, str | None] = (False, "状态已变化")
         async with room._lock:
-            if self.rooms.get(group_id) is not room:
+            if self.rooms.get(rkey) is not room:
                 return (False, "房间状态已变化")
             if room.phase != "playing":
                 return (False, "状态已变化")
@@ -655,12 +730,9 @@ class RoomManager:
                 self._arm_choice_timer(room)
                 result = (True, None)
             elif mode == "bot":
-                cancelled_choice = self._cancel_choice_timer(group_id)
+                cancelled_choice = self._cancel_choice_timer(rkey)
                 text = await self.resolve_asker_bot(room)
-                if (
-                    self.rooms.get(group_id) is not room
-                    or room.phase != "playing"
-                ):
+                if self.rooms.get(rkey) is not room or room.phase != "playing":
                     result = (False, "房间状态已变化")
                 else:
                     result = (True, text)
@@ -671,7 +743,7 @@ class RoomManager:
         return result
 
     async def submit_question(
-        self, group_id: str, caller_id: str, text: str
+        self, group_id: str, caller_id: str, text: str, *, umo: str = ""
     ) -> tuple[bool, str | None]:
         """Asker submits a self-written question. LOCKED.
 
@@ -680,8 +752,8 @@ class RoomManager:
         :meth:`_submit_human_question`; resets ``idle_streak``.
         Returns ``(True, question_text)`` or ``(False, reason)``.
         """
-        room = self.rooms.get(group_id)
-        if room is None:
+        rkey, room = self._lookup_room(group_id, umo=umo)
+        if room is None or rkey is None:
             return (False, "房间状态已变化")
         stripped = str(text).strip() if text is not None else ""
         if not stripped:
@@ -689,7 +761,7 @@ class RoomManager:
         cancelled_choice: asyncio.Task | None = None
         result: tuple[bool, str | None] = (False, "状态已变化")
         async with room._lock:
-            if self.rooms.get(group_id) is not room:
+            if self.rooms.get(rkey) is not room:
                 return (False, "房间状态已变化")
             if room.phase != "playing":
                 return (False, "状态已变化")
@@ -698,7 +770,7 @@ class RoomManager:
             if room.last_pair is None or caller_id != room.last_pair[0]:
                 return (False, "还没有轮到你")
             room.idle_streak = 0
-            cancelled_choice = self._cancel_choice_timer(group_id)
+            cancelled_choice = self._cancel_choice_timer(rkey)
             q = self._submit_human_question(room, stripped)
             result = (True, q)
         if cancelled_choice is not None:
@@ -711,7 +783,7 @@ class RoomManager:
         ADVANCE CONTRACT:
           1. ``room.advance_count += 1`` (monotonic race-detection source).
           2. ``text = await self.advance_hook(room, self)``  <- await point.
-          3. Identity recheck after the await: ``rooms.get(gid) is room`` AND
+          3. Identity recheck after the await: ``rooms.get(room_key) is room`` AND
              ``phase == "playing"``. On failure return ``(False, "房间已结束")``
              WITHOUT announcing (drop silently).
           4. If hook left the room in ``awaiting_asker_*``, arm the choice timer.
@@ -726,12 +798,12 @@ class RoomManager:
             raise
         except Exception:
             logger.exception(
-                "advance_hook failed for group=%s; using placeholder",
-                room.group_id,
+                "advance_hook failed for room=%s; using placeholder",
+                room.room_key,
             )
             text = None
         # after-await identity recheck — the room may have ended mid-generate
-        if self.rooms.get(room.group_id) is not room or room.phase != "playing":
+        if self.rooms.get(room.room_key) is not room or room.phase != "playing":
             return (False, "房间已结束")
         if text is None or not str(text).strip():
             text = f"（占位问题 · 第 {room.advance_count} 题）"
@@ -741,22 +813,25 @@ class RoomManager:
 
     # ---------------------------------------------------------------- timers
     def _arm_waiting_timer(self, room: Room) -> None:
-        self._cancel_task(self._waiting_tasks, room.group_id)
-        self._waiting_tasks[room.group_id] = asyncio.create_task(
-            self._waiting_timer_loop(room.group_id, room)
+        rkey = room.room_key
+        self._cancel_task(self._waiting_tasks, rkey)
+        self._waiting_tasks[rkey] = asyncio.create_task(
+            self._waiting_timer_loop(rkey, room)
         )
 
     def _arm_idle_timer(self, room: Room) -> None:
-        self._cancel_task(self._idle_tasks, room.group_id)
-        self._idle_tasks[room.group_id] = asyncio.create_task(
-            self._idle_timer_loop(room.group_id, room)
+        rkey = room.room_key
+        self._cancel_task(self._idle_tasks, rkey)
+        self._idle_tasks[rkey] = asyncio.create_task(
+            self._idle_timer_loop(rkey, room)
         )
 
     def _arm_choice_timer(self, room: Room) -> None:
         """Arm (or re-arm) the human-asker choice timeout for ``room``."""
-        self._cancel_task(self._choice_tasks, room.group_id)
-        self._choice_tasks[room.group_id] = asyncio.create_task(
-            self._choice_timer_loop(room.group_id, room)
+        rkey = room.room_key
+        self._cancel_task(self._choice_tasks, rkey)
+        self._choice_tasks[rkey] = asyncio.create_task(
+            self._choice_timer_loop(rkey, room)
         )
 
     def _cancel_task(
@@ -990,9 +1065,24 @@ class RoomManager:
                 return
 
     # ------------------------------------------------------------------ misc
+    def _is_in_quiet_hours(self) -> bool:
+        ctx = getattr(self, "context", None)
+        if ctx is None:
+            return False
+        try:
+            from ....series_panels import is_series_in_quiet_hours
+
+            return bool(is_series_in_quiet_hours(ctx))
+        except Exception:
+            return False
+
     async def _send_text(self, bot: Any, text: str) -> None:
         """Duck-typed send: ``bot`` must expose ``send(text)`` returning an
-        awaitable (or be ``None``). Failures are logged and swallowed."""
+        awaitable (or be ``None``). Suppressed during series quiet hours;
+        failures are logged and swallowed."""
+        if self._is_in_quiet_hours():
+            logger.debug("静默时段内抑制真心话房间主动播报: %r", text[:40])
+            return
         if bot is None:
             return
         send = getattr(bot, "send", None)

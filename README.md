@@ -47,6 +47,7 @@
 - **21 点**：`/创建21点` · `/加入21点` · `/开始21点` · `/要牌` · `/停牌`
 - **今日小猪**：`今日小猪`
 - **吃什么**：`@Bot 吃什么` · `/口味` · `/喜欢吃` · `/不吃`
+- **Steam 状态监控**：`/steam list` · `/steamwho`（`在干嘛`）· `/steam bind` · `/steam rank` · `/steam price` · `/steam openbox`（首次启动自动只读迁移旧版 `steam_status_monitor_V3` 数据与空白配置项）
 
 ---
 

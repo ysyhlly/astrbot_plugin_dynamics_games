@@ -1,0 +1,282 @@
+{% extends "base.html" %}
+
+{% block extra_css %}
+.ob-head-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+.ob-name-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.ob-name {
+  font-size: 22px;
+  font-weight: 800;
+  color: #ffffff;
+}
+.ob-level-ring {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 2px solid var(--steam-blue);
+  background: rgba(102, 192, 244, 0.14);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+}
+.ob-meta-line {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.ob-bans-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.ob-privacy-banner {
+  background: rgba(245, 166, 35, 0.12);
+  border: 1px solid rgba(245, 166, 35, 0.45);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  color: #ffd68f;
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+.ob-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.ob-stat-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+}
+.ob-stat-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.ob-stat-value {
+  margin-top: 4px;
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--steam-blue);
+}
+.ob-game-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+.ob-game-list:last-child {
+  margin-bottom: 0;
+}
+.ob-game-row {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+.ob-game-row .cover-box {
+  width: 112px;
+  border-radius: 5px;
+}
+.ob-game-row .cover-fallback-tag {
+  display: none;
+}
+.ob-game-row .cover-fallback-title {
+  font-size: 10px;
+}
+.ob-game-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.ob-game-bar-wrap {
+  margin-top: 5px;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: #0f1722;
+  overflow: hidden;
+}
+.ob-game-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--steam-blue), #8fd3ff);
+}
+.ob-game-hours {
+  text-align: right;
+  flex-shrink: 0;
+}
+.ob-game-hours-main {
+  font-size: 14px;
+  font-weight: 700;
+  color: #ffffff;
+}
+.ob-game-hours-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+{% endblock %}
+
+{% block content %}
+<div class="accent-bar{% if current_game %} ingame{% endif %}"></div>
+
+<div class="card-header">
+  <div class="ob-head-left">
+    <div class="avatar-wrap lg">
+      <div class="avatar-box {{ status_bucket }}">
+        <span class="avatar-initial">{{ player_initial }}</span>
+        {% if avatar_url %}
+        <img class="avatar-img" src="{{ avatar_url }}" alt="{{ player_name }}" onerror="this.style.display='none'" />
+        {% endif %}
+      </div>
+      {% if avatar_frame_url %}
+      <img class="avatar-frame" src="{{ avatar_frame_url }}" alt="" onerror="this.style.display='none'" />
+      {% endif %}
+    </div>
+    <div style="min-width: 0;">
+      <div class="ob-name-row">
+        <span class="ob-name truncate">{{ player_name }}</span>
+        {% if steam_level is not none %}
+        <span class="ob-level-ring num">Lv.{{ steam_level }}</span>
+        {% endif %}
+        <span class="badge {{ status_badge_class }}">{{ status_text }}</span>
+      </div>
+      <div class="ob-meta-line">
+        <span class="mono">SteamID: {{ steam_id }}</span>
+        {% if account_age %}<span>· {{ account_age }}</span>{% endif %}
+        {% if visibility_text %}<span>· {{ visibility_text }}</span>{% endif %}
+      </div>
+      {% if current_game %}
+      <div style="margin-top: 6px; font-size: 13px; color: var(--steam-green); font-weight: 600;">
+        当前正在游玩：《{{ current_game }}》
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="card-body">
+  <div class="ob-bans-row">
+    {% if bans.vac_banned %}
+    <span class="badge badge-red">VAC 封禁 ×{{ bans.number_of_vac_bans }}{% if bans.days_since_last_ban %} (距今 {{ bans.days_since_last_ban }} 天){% endif %}</span>
+    {% else %}
+    <span class="badge badge-ingame">VAC 状态正常</span>
+    {% endif %}
+
+    {% if bans.number_of_game_bans > 0 %}
+    <span class="badge badge-red">游戏封禁 ×{{ bans.number_of_game_bans }}</span>
+    {% else %}
+    <span class="badge badge-blue">无游戏封禁</span>
+    {% endif %}
+
+    {% if bans.community_banned %}
+    <span class="badge badge-red">社区封禁</span>
+    {% endif %}
+
+    {% if bans.economy_ban and bans.economy_ban != "none" %}
+    <span class="badge badge-amber">交易状态: {{ bans.economy_ban }}</span>
+    {% endif %}
+  </div>
+
+  {% if privacy_note %}
+  <div class="ob-privacy-banner">⚠ {{ privacy_note }}</div>
+  {% endif %}
+
+  <div class="ob-stats-grid num">
+    <div class="ob-stat-card">
+      <div class="ob-stat-label">拥有游戏数</div>
+      <div class="ob-stat-value">{{ owned_games_text }}</div>
+    </div>
+    <div class="ob-stat-card">
+      <div class="ob-stat-label">总游戏时长</div>
+      <div class="ob-stat-value">{{ total_playtime_text }}</div>
+    </div>
+    <div class="ob-stat-card">
+      <div class="ob-stat-label">近两周活跃</div>
+      <div class="ob-stat-value">{{ recent_games | length }} 款</div>
+    </div>
+  </div>
+
+  {% if recent_games %}
+  <div class="section-title">近两周游玩 ({{ recent_games | length }})</div>
+  <div class="ob-game-list">
+    {% for g in recent_games %}
+    <div class="ob-game-row">
+      <div class="cover-box">
+        <div class="cover-fallback">
+          <span class="cover-fallback-title">{{ g.name }}</span>
+        </div>
+        {% if g.cover_url %}
+        <img class="cover-img" src="{{ g.cover_url }}" alt="{{ g.name }}" onerror="this.style.display='none'" />
+        {% endif %}
+      </div>
+      <div style="min-width: 0;">
+        <div class="ob-game-name truncate">{{ g.name }}</div>
+      </div>
+      <div class="ob-game-hours num">
+        <div class="ob-game-hours-main" style="color: var(--steam-green);">近2周 {{ g.recent_hours_text }}</div>
+        {% if g.forever_hours_text %}
+        <div class="ob-game-hours-sub">累计 {{ g.forever_hours_text }}</div>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if top_games %}
+  <div class="section-title">历史游玩时长 TOP {{ top_games | length }}</div>
+  <div class="ob-game-list">
+    {% for g in top_games %}
+    <div class="ob-game-row">
+      <div class="cover-box">
+        <div class="cover-fallback">
+          <span class="cover-fallback-title">{{ g.name }}</span>
+        </div>
+        {% if g.cover_url %}
+        <img class="cover-img" src="{{ g.cover_url }}" alt="{{ g.name }}" onerror="this.style.display='none'" />
+        {% endif %}
+      </div>
+      <div style="min-width: 0;">
+        <div class="ob-game-name truncate">#{{ loop.index }} {{ g.name }}</div>
+        <div class="ob-game-bar-wrap">
+          <div class="ob-game-bar-fill" style="width: {{ g.bar_pct }}%;"></div>
+        </div>
+      </div>
+      <div class="ob-game-hours num">
+        <div class="ob-game-hours-main">{{ g.forever_hours_text }}</div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+<div class="card-footer">
+  <span class="mono truncate">{{ profile_url or ("https://steamcommunity.com/profiles/" ~ steam_id) }}</span>
+  <span>Steam 玩家档案</span>
+</div>
+{% endblock %}

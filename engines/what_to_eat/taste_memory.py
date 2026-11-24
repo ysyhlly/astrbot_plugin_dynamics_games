@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field
@@ -12,6 +13,9 @@ from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
+
+_OWNER_PLUGIN_ID = "astrbot_plugin_dynamics_games"
+_LEGACY_PLUGIN_ID = "astrbot_plugin_what_to_eat"
 
 # 自然语言口味抽取（轻量规则，不依赖 LLM）
 _LIKE_PATTERNS = (
@@ -233,6 +237,7 @@ class TasteMemoryStore:
         *,
         enabled: bool = True,
         data_dir: Path | None = None,
+        legacy_data_dir: Path | None = None,
         max_recent: int = 20,
         avoid_recent_count: int = 6,
         learn_from_message: bool = True,
@@ -243,7 +248,7 @@ class TasteMemoryStore:
         self.auto_learn = bool(learn_from_message)
         self._lock = threading.RLock()
         self._profiles: dict[str, UserTasteProfile] = {}
-        self._path = self._resolve_path(data_dir)
+        self._path = self._resolve_path(data_dir, legacy_data_dir=legacy_data_dir)
         self._load()
         logger.info(
             "口味记忆初始化: enabled=%s path=%s users=%s avoid_recent=%s auto_learn=%s",
@@ -255,34 +260,53 @@ class TasteMemoryStore:
         )
 
     @staticmethod
-    def _resolve_path(data_dir: Path | None) -> Path:
+    def _resolve_path(
+        data_dir: Path | None, *, legacy_data_dir: Path | None = None
+    ) -> Path:
+        legacy_base: Path | None = (
+            Path(legacy_data_dir) if legacy_data_dir is not None else None
+        )
         if data_dir is not None:
             base = Path(data_dir)
         else:
             base = None
-            # 优先 AstrBot 官方插件数据目录
             try:
                 from astrbot.api.star import StarTools
 
-                raw = StarTools.get_data_dir("astrbot_plugin_what_to_eat")
+                raw = StarTools.get_data_dir(_OWNER_PLUGIN_ID)
                 if raw is not None:
-                    base = Path(raw)
+                    base = Path(raw) / "what_to_eat"
+                if legacy_base is None:
+                    raw_legacy = StarTools.get_data_dir(_LEGACY_PLUGIN_ID)
+                    if raw_legacy is not None:
+                        legacy_base = Path(raw_legacy)
             except Exception:
                 base = None
-            if base is None:
-                try:
-                    from astrbot.api.star import StarTools
-
-                    raw = StarTools.get_data_dir("astrbot_plugin_what_to_eat")
-                    if raw is not None:
-                        base = Path(raw)
-                except Exception:
-                    base = None
             if base is None:
                 # 回退到插件旁 data/
                 base = Path(__file__).resolve().parent / "data"
         base.mkdir(parents=True, exist_ok=True)
-        return base / "taste_memory.json"
+        target = base / "taste_memory.json"
+        if not target.exists() and legacy_base is not None:
+            legacy_file = legacy_base / "taste_memory.json"
+            try:
+                if (
+                    legacy_file.is_file()
+                    and legacy_file.resolve() != target.resolve()
+                ):
+                    tmp = target.with_suffix(".json.migrate.tmp")
+                    shutil.copy2(legacy_file, tmp)
+                    tmp.replace(target)
+                    logger.info(
+                        "[WhatToEat] 已自动迁移旧版口味记忆: %s -> %s",
+                        legacy_file,
+                        target,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[WhatToEat] 迁移旧版口味记忆失败（已保留原文件）: %s", exc
+                )
+        return target
 
     def _load(self) -> None:
         if not self._path.exists():

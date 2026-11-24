@@ -143,6 +143,14 @@ ENGINE_CATALOG: tuple[dict[str, str], ...] = (
         "entry": "@机器人 吃什么 · /口味 · /喜欢吃 · /忌口",
         "desc": "按群友口味档案、避重记忆与菜谱库推荐三餐",
     },
+    {
+        "key": "steam_monitor",
+        "config_flag": "enable_steam_monitor",
+        "label": "Steam 状态监控",
+        "category": "开黑监控",
+        "entry": "/steam list · /steamwho · /steam rank · /steam price",
+        "desc": "高频精准轮询群友 Steam 游戏状态、成就解锁、自然日时长排行与商店查价",
+    },
 )
 
 RISK_WORDS: tuple[str, ...] = (

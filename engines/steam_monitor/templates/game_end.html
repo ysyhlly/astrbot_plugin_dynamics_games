@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+
+{% block extra_css %}
+.ge-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+.ge-player-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.ge-player-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ge-player-name {
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--text-primary);
+  max-width: 340px;
+}
+.ge-time {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.ge-main {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 18px;
+  align-items: center;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 16px;
+}
+.ge-info {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.ge-game-zh {
+  font-size: 20px;
+  font-weight: 700;
+  color: #ffffff;
+  line-height: 1.25;
+}
+.ge-game-en {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: -6px;
+}
+.ge-duration-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  padding: 7px 14px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(102, 192, 244, 0.18), rgba(42, 71, 94, 0.45));
+  border: 1px solid rgba(102, 192, 244, 0.4);
+  color: #e3f4ff;
+  font-size: 15px;
+  font-weight: 700;
+}
+.ge-duration-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--steam-blue);
+}
+.ge-tip {
+  margin-top: 14px;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  background: rgba(102, 192, 244, 0.08);
+  border-left: 3px solid var(--steam-blue);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+{% endblock %}
+
+{% block content %}
+<div class="accent-bar ended"></div>
+
+<div class="card-header">
+  <div class="ge-head">
+    <div class="avatar-wrap">
+      <div class="avatar-box">
+        <span class="avatar-initial">{{ player_initial }}</span>
+        {% if avatar_url %}
+        <img class="avatar-img" src="{{ avatar_url }}" alt="{{ player_name }}" onerror="this.style.display='none'" />
+        {% endif %}
+      </div>
+      {% if avatar_frame_url %}
+      <img class="avatar-frame" src="{{ avatar_frame_url }}" alt="" onerror="this.style.display='none'" />
+      {% endif %}
+    </div>
+    <div class="ge-player-meta">
+      <div class="ge-player-row">
+        <span class="ge-player-name truncate">{{ player_name }}</span>
+        <span class="badge badge-slate">结束了游玩</span>
+      </div>
+      {% if group_name %}
+      <div style="font-size: 12px; color: var(--text-muted);">{{ group_name }}</div>
+      {% endif %}
+    </div>
+  </div>
+  {% if timestamp %}
+  <div class="ge-time mono">{{ timestamp }}</div>
+  {% endif %}
+</div>
+
+<div class="card-body">
+  <div class="ge-main">
+    <div class="cover-box">
+      <div class="cover-fallback">
+        <span class="cover-fallback-tag">SESSION END</span>
+        <span class="cover-fallback-title">{{ game_name }}</span>
+      </div>
+      {% if cover_url %}
+      <img class="cover-img" src="{{ cover_url }}" alt="{{ game_name }}" onerror="this.style.display='none'" />
+      {% endif %}
+    </div>
+    <div class="ge-info">
+      <div class="ge-game-zh">{{ game_name }}</div>
+      {% if game_name_en and game_name_en != game_name %}
+      <div class="ge-game-en">{{ game_name_en }}</div>
+      {% endif %}
+      <div class="ge-duration-box num">
+        <span class="ge-duration-label">本次时长</span>
+        <span>{{ duration_text }}</span>
+      </div>
+    </div>
+  </div>
+
+  {% if tip %}
+  <div class="ge-tip">{{ tip }}</div>
+  {% endif %}
+</div>
+
+<div class="card-footer">
+  <span>Steam 状态监控{% if appid %} · AppID {{ appid }}{% endif %}</span>
+  {% if timestamp %}<span class="mono">结束于 {{ timestamp }}</span>{% endif %}
+</div>
+{% endblock %}

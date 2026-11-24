@@ -125,13 +125,32 @@ def is_admin_of(event: Any) -> bool:
 
 
 def room_origin_of(event: Any) -> str:
-    return str(getattr(event, "unified_msg_origin", "") or "")
+    return str(getattr(event, "unified_msg_origin", "") or "").strip()
+
+
+def room_key_of(event: Any) -> str | None:
+    """Adapter-aware room key: full ``unified_msg_origin`` when present, else ``group_id``."""
+    gid = group_id_of(event)
+    if not gid:
+        return None
+    umo = room_origin_of(event)
+    return umo or gid
+
+
+def _get_room_for_key(manager: Any, key: str, *, umo: str = "") -> Any | None:
+    getter = getattr(manager, "get_room", None)
+    if callable(getter):
+        return getter(key, umo=umo)
+    rooms = getattr(manager, "rooms", None) or {}
+    if umo and umo in rooms:
+        return rooms.get(umo)
+    return rooms.get(key)
 
 
 def _preflight(
     manager: Any, event: Any, need_uid: bool, *, checks_room: bool = True,
 ) -> tuple[Reply | None, str | None, str | None]:
-    """Common guards; returns ``(failure_reply_or_None, gid, uid)``.
+    """Common guards; returns ``(failure_reply_or_None, room_key, uid)``.
 
     Order matters: group check first (private chat → hint), then the manager
     presence check (``None`` → "插件尚未完成初始化"), then the identity check.
@@ -141,16 +160,18 @@ def _preflight(
         return (Reply.plain("真心话只能在群里玩哦。"), None, None)
     if manager is None:
         return (Reply.plain("插件尚未完成初始化，请稍后再试。"), None, None)
-    if checks_room:
-        room = manager.rooms.get(gid)
-        if room is not None and room.umo != room_origin_of(event):
+    umo = room_origin_of(event)
+    rkey = umo or gid
+    if checks_room and umo:
+        room = (getattr(manager, "rooms", None) or {}).get(rkey)
+        if room is not None and room.umo and room.umo != umo:
             return (Reply.plain("本会话没有可访问的真心话房间。"), None, None)
     uid = None
     if need_uid:
         uid = user_id_of(event)
         if not uid:
             return (Reply.plain("无法获取你的身份信息，请重试。"), None, None)
-    return (None, gid, uid)
+    return (None, rkey, uid)
 
 
 def _manager_config(manager: Any) -> dict:
@@ -199,19 +220,26 @@ async def cmd_create(manager: Any, event: Any) -> Reply:
 
     重复开房由 RoomManager 拒绝（提示已存在）。无房可报时回复提示。
     """
-    fail, gid, uid = _preflight(manager, event, need_uid=True)
+    fail, rkey, uid = _preflight(manager, event, need_uid=True)
     if fail is not None:
         return fail
-    assert gid and uid
+    assert rkey and uid
+    gid = group_id_of(event) or rkey
+    umo = room_origin_of(event)
     nickname = nickname_of(event, uid)
-    ok, reason = manager.create(gid, uid, nickname, bot=getattr(event, "bot", None))
+    try:
+        ok, reason = manager.create(
+            gid, uid, nickname, bot=getattr(event, "bot", None), umo=umo
+        )
+    except TypeError:
+        ok, reason = manager.create(rkey, uid, nickname, bot=getattr(event, "bot", None))
     if not ok:
         return Reply.plain(reason)
-    room = manager.rooms.get(gid)
-    if room is not None:
+    room = _get_room_for_key(manager, rkey, umo=umo)
+    if room is not None and not getattr(room, "umo", ""):
         # T10: capture the session origin so the flow hook can scope its
         # LLM/LM calls (session_id for memory search, provider resolution).
-        room.umo = room_origin_of(event)
+        room.umo = umo
     return Reply(
         parts=[
             ("text", "🎲 真心话房间已创建！"),
@@ -234,15 +262,15 @@ async def cmd_join(manager: Any, event: Any) -> Reply:
     无房 / 重复报名 / 人数已满 由 RoomManager 给出拒绝原因。
     开局后加入成功时提示从下一轮参与。
     """
-    fail, gid, uid = _preflight(manager, event, need_uid=True)
+    fail, rkey, uid = _preflight(manager, event, need_uid=True)
     if fail is not None:
         return fail
-    assert gid and uid
+    assert rkey and uid
     nickname = nickname_of(event, uid)
-    ok, reason = manager.join(gid, uid, nickname)
+    ok, reason = manager.join(rkey, uid, nickname)
     if not ok:
         return Reply.plain(reason)
-    room = manager.rooms.get(gid)
+    room = _get_room_for_key(manager, rkey, umo=room_origin_of(event))
     count = len(room.players) if room is not None else 1
     if room is not None and getattr(room, "phase", None) == "playing":
         second = "游戏进行中，你将从下一轮开始参与。"
@@ -267,21 +295,21 @@ async def cmd_start(manager: Any, event: Any) -> Reply:
     ``bot_ask_enabled`` 时 1 人可开局（机器人可当提问者）。
     ``start`` 成功时 ``reason`` 为第一轮展示文本（选择提示或题目）。
     """
-    fail, gid, uid = _preflight(manager, event, need_uid=True)
+    fail, rkey, uid = _preflight(manager, event, need_uid=True)
     if fail is not None:
         return fail
-    assert gid and uid
+    assert rkey and uid
     is_admin = is_admin_of(event)
-    ok, reason = await manager.start(gid, uid, is_admin)
+    ok, reason = await manager.start(rkey, uid, is_admin)
     if not ok:
         return Reply.plain(reason)
-    room = manager.rooms.get(gid)
+    room = _get_room_for_key(manager, rkey, umo=room_origin_of(event))
     n = len(room.players) if room is not None else 0
     from .flow import complete_and_announce  # noqa: PLC0415 - cycle break
 
     announce_reply = await complete_and_announce(
         manager,
-        gid,
+        rkey,
         uid,
         is_admin,
         reason,
@@ -513,9 +541,13 @@ async def handle_playing_message(
     """
     if manager is None or not gid or not uid:
         return None
-    room = manager.rooms.get(gid)
-    if room is None or room.umo != umo or room.phase != "playing":
+    clean_umo = str(umo or "").strip()
+    room = _get_room_for_key(manager, clean_umo or gid, umo=clean_umo)
+    if room is None or room.phase != "playing":
         return None
+    if clean_umo and room.umo and room.umo != clean_umo:
+        return None
+    rkey = getattr(room, "room_key", "") or clean_umo or gid
 
     stage = str(getattr(room, "round_stage", "") or "")
     stripped = (text or "").strip()
@@ -527,18 +559,18 @@ async def handle_playing_message(
         if asker_id is None or uid != asker_id:
             return None
         if stripped in _SELF_MODE_KEYWORDS:
-            ok, qtext = await manager.choose_asker_mode(gid, uid, "self")
+            ok, qtext = await manager.choose_asker_mode(rkey, uid, "self")
             if not ok:
                 return None
             return await _announce_reply(
-                manager, gid, uid, is_admin, qtext or "", skip_prefix=False
+                manager, rkey, uid, is_admin, qtext or "", skip_prefix=False
             )
         if _is_bot_mode_keyword(stripped):
-            ok, qtext = await manager.choose_asker_mode(gid, uid, "bot")
+            ok, qtext = await manager.choose_asker_mode(rkey, uid, "bot")
             if not ok:
                 return None
             return await _announce_reply(
-                manager, gid, uid, is_admin, qtext or "", skip_prefix=False
+                manager, rkey, uid, is_admin, qtext or "", skip_prefix=False
             )
         return None
 
@@ -547,23 +579,23 @@ async def handle_playing_message(
             return None
         if not stripped:
             return Reply.plain("题目不能为空，请重新发送。")
-        ok, qtext = await manager.submit_question(gid, uid, stripped)
+        ok, qtext = await manager.submit_question(rkey, uid, stripped)
         if not ok:
             return None
         return await _announce_reply(
-            manager, gid, uid, is_admin, qtext or stripped, skip_prefix=False
+            manager, rkey, uid, is_admin, qtext or stripped, skip_prefix=False
         )
 
     if stage == "question_out":
         # Quote-answer auto-next: any Reply component from the current askee.
         if not has_reply or askee_id is None or uid != askee_id:
             return None
-        ok, qtext = await manager.next(gid, uid, is_admin, by_human=True)
+        ok, qtext = await manager.next(rkey, uid, is_admin, by_human=True)
         if not ok:
             # Concurrent end / room gone — stay silent (do not spam the askee).
             return None
         return await _announce_reply(
-            manager, gid, uid, is_admin, qtext or "", skip_prefix=False
+            manager, rkey, uid, is_admin, qtext or "", skip_prefix=False
         )
 
     return None

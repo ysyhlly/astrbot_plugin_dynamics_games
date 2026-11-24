@@ -27,6 +27,7 @@ LEGACY_PLUGINS: tuple[tuple[str, str], ...] = (
     ("astrbot_plugin_blackjack21", "21点"),
     ("astrbot_plugin_rollpig", "今日小猪"),
     ("astrbot_plugin_what_to_eat", "是啊，吃什么"),
+    ("steam_status_monitor_V3", "Steam 状态监控"),
 )
 
 LEGACY_PLUGIN_IDS: frozenset[str] = frozenset(item[0] for item in LEGACY_PLUGINS)

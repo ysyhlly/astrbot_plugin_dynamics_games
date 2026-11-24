@@ -44,6 +44,9 @@ try:
         _star_is_usable,
         _star_meta,
     )
+    from ....bridges.memory_bridge import (
+        find_memory_plugin as _shared_find_memory_plugin,
+    )
 except Exception:  # pragma: no cover - standalone truth_game import fallback
     _LM_FACADE_MODULES = (
         "astrbot_plugin_dynamics_memory.api.public",
@@ -56,13 +59,30 @@ except Exception:  # pragma: no cover - standalone truth_game import fallback
         "LivingMemory",
         "astrbot_plugin_livingmemory",
     )
+    _shared_find_memory_plugin = None
 
     def _star_is_usable(star: Any) -> bool:
-        if star is None or getattr(star, "activated", True) is False:
+        if star is None:
             return False
-        owner = getattr(star, "star_cls", None)
+        activated = (
+            star.get("activated", True)
+            if isinstance(star, dict)
+            else getattr(star, "activated", True)
+        )
+        if activated is False:
+            return False
+        owner = (
+            (star.get("star_cls") or star.get("star") or star.get("plugin"))
+            if isinstance(star, dict)
+            else (
+                getattr(star, "star_cls", None)
+                or getattr(star, "star", None)
+                or getattr(star, "plugin", None)
+            )
+        )
         return (
             owner is not None
+            and not isinstance(owner, type)
             and not getattr(owner, "_terminating", False)
             and not getattr(owner, "_closed", False)
         )
@@ -70,7 +90,11 @@ except Exception:  # pragma: no cover - standalone truth_game import fallback
     def _star_meta(star: Any) -> set[str]:
         names: set[str] = set()
         for field in ("name", "display_name", "root_dir_name", "module_path"):
-            value = getattr(star, field, None)
+            value = (
+                star.get(field)
+                if isinstance(star, dict)
+                else getattr(star, field, None)
+            )
             if value is not None:
                 text = str(value).strip().lower()
                 if text:
@@ -79,24 +103,47 @@ except Exception:  # pragma: no cover - standalone truth_game import fallback
 
 _LM_FACADE_MODULE = _LM_FACADE_MODULES[0]
 
-#: 门面 ALIASES 是常量契约（运行期不会变），import 期取一次即可。
-try:
-    from astrbot_plugin_livingmemory.api.public import (
-        ALIASES as _LM_PUBLIC_ALIASES,
-    )
-except Exception:  # ImportError or any load error -> facade unavailable
-    _LM_PUBLIC_ALIASES = None
 
-#: PRIMARY weakref 读取器：这是**唯一**保留 import 期绑定的门面函数。
-#: B6 起 LivingMemory 把 weakref 放进不会被热重载摘除的 ``<pkg>.main``，
-#: 因此这个旧函数对象也能读到重载后的新实例（见 passive_group_capture._plugin_ref_holder），
-#: 同时保留 ``_lm_get_active is None`` == "LM 不可导入" 的既有语义（测试依赖）。
-try:
-    from astrbot_plugin_livingmemory.api.public import (
-        get_active_plugin as _lm_public_get_active_plugin,
+def _is_usable_plugin(inst: Any) -> bool:
+    return (
+        inst is not None
+        and not isinstance(inst, type)
+        and not getattr(inst, "_terminating", False)
+        and not getattr(inst, "_closed", False)
     )
-except Exception:  # ImportError or any load error -> facade unavailable
-    _lm_public_get_active_plugin = None
+
+
+def _extract_star_owner(star: Any) -> Any | None:
+    if star is None:
+        return None
+    if isinstance(star, dict):
+        owner = star.get("star_cls") or star.get("star") or star.get("plugin")
+    else:
+        owner = (
+            getattr(star, "star_cls", None)
+            or getattr(star, "star", None)
+            or getattr(star, "plugin", None)
+        )
+    return owner if _is_usable_plugin(owner) else None
+
+
+#: 优先探测 Dynamics Memory 公开门面，再回退旧版 LivingMemory 门面与旧私有路径。
+_facade_active_getters: list[Any] = []
+_merged_aliases: list[str] = list(_SHARED_LM_ALIASES)
+
+for _mod_name in _LM_FACADE_MODULES:
+    try:
+        _mod = importlib.import_module(_mod_name)
+    except Exception:
+        continue
+    _aliases = getattr(_mod, "ALIASES", None)
+    if _aliases:
+        for _alias in _aliases:
+            if _alias and _alias not in _merged_aliases:
+                _merged_aliases.append(_alias)
+    _getter = getattr(_mod, "get_active_plugin", None)
+    if callable(_getter):
+        _facade_active_getters.append(_getter)
 
 #: 旧私有路径（仅当门面不可用时使用；旧版本 LivingMemory 没有 ``api`` 包）。
 try:
@@ -106,16 +153,28 @@ try:
 except Exception:  # ImportError or any plugin load error -> LivingMemory absent
     _lm_legacy_get_active = None
 
-#: PRIMARY weakref reader. Facade first, private module only as fallback.
-_lm_get_active = _lm_public_get_active_plugin or _lm_legacy_get_active
+if callable(_lm_legacy_get_active):
+    _facade_active_getters.append(_lm_legacy_get_active)
+
+
+def _combined_get_active() -> Any | None:
+    for getter in _facade_active_getters:
+        try:
+            inst = getter()
+        except Exception:
+            continue
+        if _is_usable_plugin(inst):
+            return inst
+    return None
+
+
+#: PRIMARY weakref reader. Dynamics Memory / LivingMemory facade first, legacy fallback.
+_lm_get_active = _combined_get_active if _facade_active_getters else None
 
 #: Plugin identities checked against ``context.get_registered_star`` and
 #: against star metadata fields (name / display_name / root_dir_name /
-#: module_path), case-insensitively. 门面可用时以门面的 ALIASES 为唯一真源。
-_LM_ALIASES: tuple[str, ...] = tuple(_SHARED_LM_ALIASES)
-
-if _LM_PUBLIC_ALIASES:
-    _LM_ALIASES = tuple(_LM_PUBLIC_ALIASES)
+#: module_path), case-insensitively.
+_LM_ALIASES: tuple[str, ...] = tuple(_merged_aliases)
 
 
 def _facade_fn(name: str):
@@ -133,53 +192,55 @@ def _facade_fn(name: str):
 
 def _facade_find_plugin(context: Any) -> Any | None:
     """经门面解析插件实例；门面不可用/调用失败时 None（由本地回退接手）。"""
-    fn = _facade_fn("find_plugin")
-    if fn is None:
-        return None
-    try:
-        inst = fn(context)
-        if inst is not None and (getattr(inst, "_terminating", False) or getattr(inst, "_closed", False)):
-            return None
-        return inst
-    except Exception:
-        return None
+    for mod_name in _LM_FACADE_MODULES:
+        try:
+            module = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        fn = getattr(module, "find_plugin", None)
+        if not callable(fn):
+            continue
+        try:
+            inst = fn(context)
+        except Exception:
+            continue
+        if _is_usable_plugin(inst):
+            return inst
+    return None
 
 
 def detect_lm(context: Any) -> Any | None:
-    """Return the LivingMemory plugin instance, or None.
+    """Return the Dynamics Memory / LivingMemory plugin instance, or None.
 
-    FIXED resolution order:
+    Resolution order:
+    1. PRIMARY — ``_lm_get_active()`` weakref reader (supports monkeypatching).
+    2. FACADE — ``astrbot_plugin_dynamics_memory.api.public`` then
+       ``astrbot_plugin_livingmemory.api.public`` ``find_plugin(context)``.
+    3. SHARED BRIDGE — ``bridges.memory_bridge.find_memory_plugin(context)``.
+    4. FALLBACK — ``context.get_registered_star(alias)`` for ``_LM_ALIASES``.
+    5. LAST RESORT — scan ``context.get_all_stars()`` (supports ``dict`` and ``list``).
 
-    1. PRIMARY — ``_lm_get_active()``: the weakref LivingMemory publishes
-       itself; returns the LivingMemoryPlugin instance directly. (Tests drive
-       this path by monkeypatching ``_lm_get_active``, so it stays first.)
-    2. FACADE — LivingMemory's ``api.public.find_plugin(context)``, resolved
-       lazily at call time (B6), which re-implements steps 1/3/4 inside the
-       plugin that owns them.
-    3. FALLBACK — ``context.get_registered_star(alias)`` for each of
-       ``_LM_ALIASES``; the first usable star yields its ``star_cls``.
-    4. LAST RESORT — scan ``context.get_all_stars()`` and match each star's
-       metadata fields against the same aliases (case-insensitive); the first
-       hit yields its ``star_cls``.
-
-    The plugin instance (``star.star_cls``) is returned, never the star meta
-    object. Every external access is guarded; this function never raises.
-
-    Steps 3–4 are kept verbatim as a compatibility fallback: they run when the
-    facade is unavailable, or when the facade finds nothing (e.g. a partially
-    initialised context that the local scan can still resolve).
+    Every path validates ``not _terminating and not _closed``. Never raises.
     """
     if _lm_get_active is not None:
         try:
             plugin = _lm_get_active()
         except Exception:
             plugin = None
-        if plugin is not None:
+        if _is_usable_plugin(plugin):
             return plugin
 
     plugin = _facade_find_plugin(context)
-    if plugin is not None:
+    if _is_usable_plugin(plugin):
         return plugin
+
+    if callable(_shared_find_memory_plugin) and context is not None:
+        try:
+            plugin = _shared_find_memory_plugin(context)
+        except Exception:
+            plugin = None
+        if _is_usable_plugin(plugin):
+            return plugin
 
     try:
         lookup = getattr(context, "get_registered_star", None)
@@ -192,7 +253,9 @@ def detect_lm(context: Any) -> Any | None:
             except Exception:
                 star = None
             if _star_is_usable(star):
-                return getattr(star, "star_cls", None)
+                owner = _extract_star_owner(star)
+                if owner is not None:
+                    return owner
 
     try:
         scanner = getattr(context, "get_all_stars", None)
@@ -201,14 +264,26 @@ def detect_lm(context: Any) -> Any | None:
     if not callable(scanner):
         return None
     try:
-        stars = scanner() or []
+        raw_stars = scanner() or []
     except Exception:
         return None
 
+    entries = (
+        list(raw_stars.items())
+        if isinstance(raw_stars, dict)
+        else [("", row) for row in raw_stars]
+    )
     wanted = {alias.lower() for alias in _LM_ALIASES}
-    for star in stars:
-        if _star_is_usable(star) and (_star_meta(star) & wanted):
-            return getattr(star, "star_cls", None)
+    for key, star in entries:
+        if not _star_is_usable(star):
+            continue
+        names = _star_meta(star)
+        if key:
+            names.add(str(key).strip().lower())
+        if names & wanted:
+            owner = _extract_star_owner(star)
+            if owner is not None:
+                return owner
     return None
 
 
@@ -274,25 +349,28 @@ def get_engine(plugin: Any) -> Any | None:
 
 
 def lm_unavailable_reason(context: Any = None) -> str:
-    """Most specific Chinese reason LivingMemory is unavailable:
+    """Most specific Chinese reason Dynamics Memory / LivingMemory is unavailable:
 
-    - module-level import failed            -> "LivingMemory 插件未加载"
-    - no plugin instance found              -> "未检测到 LivingMemory"
-    - plugin found but not initialized      -> "LivingMemory 尚未初始化"
-
-    Priority: 插件未加载 > 未检测到 > 尚未初始化 (module-level absence wins).
+    1. First probe ``detect_lm(context)`` (or ``_lm_get_active()``) so setups
+       with only ``astrbot_plugin_dynamics_memory`` installed are recognized
+       accurately instead of misreporting "插件未加载".
+    2. If a plugin instance is detected -> "群间记忆 / LivingMemory 尚未初始化"
+    3. If neither facade nor active getter is importable -> "群间记忆 / LivingMemory 插件未加载"
+    4. Otherwise -> "未检测到 群间记忆 / LivingMemory"
     """
-    if _lm_get_active is None:
-        return "LivingMemory 插件未加载"
-    try:
-        plugin = _lm_get_active()
-    except Exception:
-        plugin = None
-    if plugin is None and context is not None:
-        plugin = detect_lm(context)
-    if plugin is None:
-        return "未检测到 LivingMemory"
-    return "LivingMemory 尚未初始化"
+    plugin = detect_lm(context) if context is not None else None
+    if plugin is None and _lm_get_active is not None:
+        try:
+            cand = _lm_get_active()
+        except Exception:
+            cand = None
+        if _is_usable_plugin(cand):
+            plugin = cand
+    if plugin is not None:
+        return "群间记忆 / LivingMemory 尚未初始化"
+    if _lm_get_active is None and _facade_fn("find_plugin") is None:
+        return "群间记忆 / LivingMemory 插件未加载"
+    return "未检测到 群间记忆 / LivingMemory"
 
 
 __all__ = [

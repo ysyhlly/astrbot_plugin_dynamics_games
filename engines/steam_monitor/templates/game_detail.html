@@ -1,0 +1,350 @@
+{% extends "base.html" %}
+
+{% block extra_css %}
+.gd-hero {
+  position: relative;
+  width: 100%;
+  background: #101822;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.gd-hero .cover-box {
+  border-radius: 0;
+  border: none;
+}
+.gd-hero-overlay {
+  position: absolute;
+  inset: auto 0 0 0;
+  z-index: 2;
+  padding: 28px 22px 16px;
+  background: linear-gradient(180deg, rgba(16, 24, 34, 0) 0%, rgba(16, 24, 34, 0.84) 48%, rgba(16, 24, 34, 0.98) 100%);
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+}
+.gd-title {
+  font-size: 24px;
+  font-weight: 800;
+  color: #ffffff;
+  line-height: 1.2;
+}
+.gd-title-en {
+  font-size: 13px;
+  color: #b4c6d6;
+  margin-top: 3px;
+}
+.gd-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.gd-meta-box {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.gd-meta-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 3px;
+}
+.gd-meta-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.gd-review-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+.gd-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 16px;
+}
+.gd-tag {
+  padding: 3px 10px;
+  border-radius: 5px;
+  background: rgba(102, 192, 244, 0.12);
+  border: 1px solid rgba(102, 192, 244, 0.24);
+  color: #9dd4f5;
+  font-size: 12px;
+}
+.gd-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  background: rgba(14, 20, 27, 0.45);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid rgba(102, 192, 244, 0.45);
+}
+.gd-price-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: linear-gradient(135deg, #1b2f44 0%, #152232 100%);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 14px 18px;
+  margin-bottom: 14px;
+}
+.gd-price-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.gd-discount-tag {
+  padding: 6px 12px;
+  border-radius: 5px;
+  background: var(--steam-discount-bg);
+  color: var(--steam-lime);
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1;
+}
+.gd-price-nums {
+  text-align: right;
+}
+.gd-price-orig {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+.gd-price-final {
+  font-size: 22px;
+  font-weight: 800;
+  color: #ffffff;
+  line-height: 1.15;
+}
+.gd-price-final.free {
+  color: var(--steam-lime);
+}
+
+.gd-itad-banner {
+  background: linear-gradient(135deg, rgba(245, 197, 66, 0.14), rgba(22, 32, 45, 0.96) 60%);
+  border: 1px solid rgba(245, 197, 66, 0.45);
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.gd-itad-left {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.gd-itad-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--steam-gold);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gd-itad-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.gd-itad-price {
+  font-size: 20px;
+  font-weight: 800;
+  color: #ffe388;
+  white-space: nowrap;
+}
+
+.gd-region-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  font-size: 13px;
+}
+.gd-region-table th {
+  background: rgba(14, 20, 27, 0.65);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.gd-region-table td {
+  padding: 9px 12px;
+  border-top: 1px solid rgba(102, 192, 244, 0.08);
+  color: var(--text-primary);
+}
+.gd-region-table tr.lowest td {
+  background: rgba(144, 186, 60, 0.12);
+}
+.gd-region-table th.r,
+.gd-region-table td.r {
+  text-align: right;
+}
+{% endblock %}
+
+{% block content %}
+<div class="accent-bar store"></div>
+
+<div class="gd-hero">
+  <div class="cover-box">
+    <div class="cover-fallback">
+      <span class="cover-fallback-tag">STEAM STORE</span>
+      <span class="cover-fallback-title">{{ name }}</span>
+    </div>
+    {% if header_url %}
+    <img class="cover-img" src="{{ header_url }}" alt="{{ name }}" onerror="this.style.display='none'" />
+    {% endif %}
+  </div>
+  <div class="gd-hero-overlay">
+    <div style="min-width: 0;">
+      <div class="gd-title">{{ name }}</div>
+      {% if name_en and name_en != name %}
+      <div class="gd-title-en">{{ name_en }}</div>
+      {% endif %}
+    </div>
+    {% if appid %}
+    <span class="badge badge-blue mono">AppID {{ appid }}</span>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card-body">
+  <div class="gd-meta-grid">
+    <div class="gd-meta-box">
+      <div class="gd-meta-label">发行日期</div>
+      <div class="gd-meta-value">{{ release_date or "未知" }}</div>
+    </div>
+    <div class="gd-meta-box">
+      <div class="gd-meta-label">开发商</div>
+      <div class="gd-meta-value truncate">{{ developers_text or "未知" }}</div>
+    </div>
+    <div class="gd-meta-box">
+      <div class="gd-meta-label">发行商</div>
+      <div class="gd-meta-value truncate">{{ publishers_text or "未知" }}</div>
+    </div>
+  </div>
+
+  {% if review_summary %}
+  <div class="gd-review-bar">
+    <div style="display: flex; align-items: center; gap: 10px;">
+      <span style="font-size: 12px; color: var(--text-muted);">用户评测</span>
+      <span class="badge {{ review_badge_class }}">{{ review_summary }}</span>
+    </div>
+    <div class="num" style="font-size: 13px; color: var(--text-secondary);">
+      {% if review_percent is not none %}{{ review_percent }}% 好评{% endif %}
+      {% if review_count_text %} · 共 {{ review_count_text }} 篇{% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if tags %}
+  <div class="gd-tags">
+    {% for tag in tags %}
+    <span class="gd-tag">{{ tag }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if short_description %}
+  <div class="gd-desc">{{ short_description }}</div>
+  {% endif %}
+
+  <div class="gd-price-card">
+    <div>
+      <div style="font-size: 12px; color: var(--text-muted);">Steam 商店当前售价{% if region %} ({{ region }}){% endif %}</div>
+      <div style="font-size: 14px; font-weight: 600; color: var(--text-secondary); margin-top: 2px;">
+        {% if is_free %}免费游玩{% elif discount_percent > 0 %}限时特惠促销中{% else %}标准售价{% endif %}
+      </div>
+    </div>
+    <div class="gd-price-right num">
+      {% if discount_percent > 0 %}
+      <span class="gd-discount-tag">-{{ discount_percent }}%</span>
+      {% endif %}
+      <div class="gd-price-nums">
+        {% if original_price_formatted and discount_percent > 0 %}
+        <div class="gd-price-orig">{{ original_price_formatted }}</div>
+        {% endif %}
+        <div class="gd-price-final{% if is_free %} free{% endif %}">
+          {% if is_free %}免费开玩{% else %}{{ price_formatted or "暂无价格" }}{% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {% if itad %}
+  <div class="gd-itad-banner">
+    <div class="gd-itad-left">
+      <div class="gd-itad-title">
+        <span>ITAD 历史最低价</span>
+        {% if itad.is_historical_low %}
+        <span class="badge badge-gold">平史低 / 新史低</span>
+        {% endif %}
+      </div>
+      <div class="gd-itad-sub">
+        {% if itad.historical_low_cut %}-{{ itad.historical_low_cut }}%{% endif %}
+        {% if itad.historical_low_date %} · 记录于 {{ itad.historical_low_date }}{% endif %}
+        {% if itad.current_low_price %} · 当前全网最低 {{ itad.current_low_price }}{% if itad.current_low_shop %} ({{ itad.current_low_shop }}){% endif %}{% endif %}
+      </div>
+    </div>
+    <div class="gd-itad-price num">{{ itad.historical_low_price }}</div>
+  </div>
+  {% endif %}
+
+  {% if region_prices %}
+  <div class="section-title" style="margin-top: 14px;">跨区售价对比</div>
+  <table class="gd-region-table num">
+    <thead>
+      <tr>
+        <th>商店地区</th>
+        <th class="r">当地售价</th>
+        <th class="r">折合参考</th>
+        <th class="r">折扣</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for rp in region_prices %}
+      <tr{% if rp.is_lowest %} class="lowest"{% endif %}>
+        <td>
+          <strong>{{ rp.region_label }}</strong>
+          {% if rp.is_lowest %}<span class="badge badge-ingame" style="margin-left: 6px; font-size: 10px; padding: 1px 6px;">最低</span>{% endif %}
+        </td>
+        <td class="r">{{ rp.price_formatted }}</td>
+        <td class="r" style="color: var(--steam-blue);">{{ rp.cny_price or "-" }}</td>
+        <td class="r">
+          {% if rp.discount_percent > 0 %}
+          <span style="color: var(--steam-lime); font-weight: 700;">-{{ rp.discount_percent }}%</span>
+          {% else %}
+          <span style="color: var(--text-muted);">-</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+<div class="card-footer">
+  <span class="mono truncate">{{ store_url }}</span>
+  <span>Steam 商店查价</span>
+</div>
+{% endblock %}

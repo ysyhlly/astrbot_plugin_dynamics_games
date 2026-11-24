@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+
+{% block extra_css %}
+.ach-header-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+.ach-player-name {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.ach-game-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--steam-blue);
+  font-weight: 600;
+}
+.ach-game-thumb {
+  width: 112px;
+  flex-shrink: 0;
+}
+.ach-game-thumb .cover-box {
+  border-radius: var(--radius-sm);
+}
+.ach-game-thumb .cover-fallback-title {
+  font-size: 11px;
+}
+.ach-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ach-item {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+}
+.ach-item.rare {
+  background: linear-gradient(135deg, rgba(245, 197, 66, 0.12) 0%, rgba(22, 32, 45, 0.96) 55%);
+  border-color: rgba(245, 197, 66, 0.5);
+  box-shadow: 0 0 18px rgba(245, 197, 66, 0.12);
+}
+.ach-icon-box {
+  position: relative;
+  width: 58px;
+  height: 58px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: linear-gradient(135deg, #283c52, #182534);
+  border: 2px solid rgba(102, 192, 244, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.ach-item.rare .ach-icon-box {
+  border-color: var(--steam-gold);
+  box-shadow: 0 0 12px rgba(245, 197, 66, 0.45);
+}
+.ach-icon-fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  color: var(--steam-gold);
+}
+.ach-icon-img {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.ach-meta {
+  min-width: 0;
+}
+.ach-name {
+  font-size: 16px;
+  font-weight: 700;
+  color: #ffffff;
+  line-height: 1.3;
+}
+.ach-item.rare .ach-name {
+  color: #ffe388;
+}
+.ach-desc {
+  margin-top: 3px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+.ach-rarity {
+  flex-shrink: 0;
+  text-align: right;
+}
+{% endblock %}
+
+{% block content %}
+<div class="accent-bar gold"></div>
+
+<div class="card-header">
+  <div class="ach-header-left">
+    <div class="avatar-wrap md">
+      <div class="avatar-box ingame">
+        <span class="avatar-initial">{{ player_initial }}</span>
+        {% if avatar_url %}
+        <img class="avatar-img" src="{{ avatar_url }}" alt="{{ player_name }}" onerror="this.style.display='none'" />
+        {% endif %}
+      </div>
+      {% if avatar_frame_url %}
+      <img class="avatar-frame" src="{{ avatar_frame_url }}" alt="" onerror="this.style.display='none'" />
+      {% endif %}
+    </div>
+    <div style="min-width: 0;">
+      <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+        <span class="ach-player-name truncate">{{ player_name }}</span>
+        <span class="badge badge-gold">解锁 {{ achievements | length }} 项成就</span>
+      </div>
+      <div class="ach-game-sub truncate">《{{ game_name }}》</div>
+    </div>
+  </div>
+
+  <div class="ach-game-thumb">
+    <div class="cover-box">
+      <div class="cover-fallback">
+        <span class="cover-fallback-title">{{ game_name }}</span>
+      </div>
+      {% if cover_url %}
+      <img class="cover-img" src="{{ cover_url }}" alt="{{ game_name }}" onerror="this.style.display='none'" />
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="card-body">
+  {% if achievements %}
+  <div class="ach-list">
+    {% for ach in achievements %}
+    <div class="ach-item{% if ach.is_rare %} rare{% endif %}">
+      <div class="ach-icon-box">
+        <span class="ach-icon-fallback">★</span>
+        {% if ach.icon %}
+        <img class="ach-icon-img" src="{{ ach.icon }}" alt="{{ ach.display_name }}" onerror="this.style.display='none'" />
+        {% endif %}
+      </div>
+      <div class="ach-meta">
+        <div class="ach-name">{{ ach.display_name }}</div>
+        {% if ach.description %}
+        <div class="ach-desc">{{ ach.description }}</div>
+        {% endif %}
+      </div>
+      <div class="ach-rarity">
+        {% if ach.percent is not none %}
+          {% if ach.is_rare %}
+          <span class="badge badge-gold num">★ 稀有 {{ ach.percent_text }}</span>
+          {% else %}
+          <span class="badge badge-blue num">全球 {{ ach.percent_text }}</span>
+          {% endif %}
+        {% else %}
+          <span class="badge badge-slate">已解锁</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state">暂无成就详情</div>
+  {% endif %}
+</div>
+
+<div class="card-footer">
+  <span>Steam 成就监控{% if appid %} · AppID {{ appid }}{% endif %}</span>
+  {% if timestamp %}<span class="mono">{{ timestamp }}</span>{% endif %}
+</div>
+{% endblock %}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context, StarTools
 from astrbot.core import AstrBotConfig
 
-from ...runtime import Component
+from ...runtime import PLUGIN_ID, Component
 from ...series_panels import resolve_series_timezone
 from .rollpig.adapter import AtTargetResolver, PigPresenter
 from .rollpig.config import PluginSettings
@@ -23,6 +24,47 @@ from .rollpig.text import FontLibrary, TextMetrics
 
 PLUGIN_NAME = "astrbot_plugin_rollpig"
 DATA_FILE_NAME = "rollpig_today.json"
+
+
+def resolve_rollpig_data_dir(
+    *,
+    new_dir: Path | None = None,
+    legacy_dir: Path | None = None,
+    logger_obj=None,
+) -> Path:
+    """Resolve RollPig data dir under Dynamics Games plugin data, migrating legacy data once."""
+    target_dir = (
+        Path(new_dir)
+        if new_dir is not None
+        else Path(StarTools.get_data_dir(PLUGIN_ID)) / "rollpig"
+    )
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_file = target_dir / DATA_FILE_NAME
+    if not target_file.exists():
+        old_dir = (
+            Path(legacy_dir)
+            if legacy_dir is not None
+            else Path(StarTools.get_data_dir(PLUGIN_NAME))
+        )
+        old_file = old_dir / DATA_FILE_NAME
+        try:
+            if (
+                old_file.is_file()
+                and old_file.resolve() != target_file.resolve()
+            ):
+                tmp = target_file.with_suffix(".json.migrate.tmp")
+                shutil.copy2(old_file, tmp)
+                tmp.replace(target_file)
+                if logger_obj is not None:
+                    logger_obj.info(
+                        "[RollPig] 已自动迁移旧版今日小猪数据: %s -> %s",
+                        old_file,
+                        target_file,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            if logger_obj is not None:
+                logger_obj.warning("[RollPig] 迁移旧版数据失败（已保留原文件）: %s", exc)
+    return target_dir
 
 # 触发词是唯一事实来源：既作为指令名/别名，也作为「免唤醒词」模式的首尾匹配词
 COMMAND_NAME = "今日小猪"
@@ -58,8 +100,7 @@ class RollPigPlugin(Component):
 
         resource_dir = Path(__file__).parent / "resource"
         font_dir = resource_dir / "font"
-        data_dir = StarTools.get_data_dir(PLUGIN_NAME)
-        data_dir.mkdir(parents=True, exist_ok=True)
+        data_dir = resolve_rollpig_data_dir(logger_obj=self.logger)
         font_dir.mkdir(parents=True, exist_ok=True)  # 兼容旧版：允许用户自行补充字体
 
         self.repository = PigRepository(
@@ -106,7 +147,7 @@ class RollPigPlugin(Component):
             await event.send(event.plain_result(decision.message))
             return
 
-        pig = self.service.draw(decision.user_id)
+        pig = await asyncio.to_thread(self.service.draw, decision.user_id)
         if pig is None:
             await event.send(event.plain_result(CATALOG_UNAVAILABLE))
             return

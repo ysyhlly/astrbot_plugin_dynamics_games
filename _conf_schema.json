@@ -79,6 +79,11 @@
         "description": "启用「是啊，吃什么」口味记忆推荐",
         "type": "bool",
         "default": true
+      },
+      "enable_steam_monitor": {
+        "description": "启用「Steam 状态监控」群友游戏监控、成就、时长排行与商店查价",
+        "type": "bool",
+        "default": true
       }
     }
   },
@@ -716,6 +721,244 @@
           ".bmp"
         ],
         "hint": "上传图片，建议命名为：食物名.jpg、食物名_1.jpg 等格式"
+      }
+    }
+  },
+  "steam_monitor": {
+    "description": "Steam 状态监控引擎配置",
+    "type": "object",
+    "items": {
+      "steam_api_key": {
+        "description": "Steam Web API Key",
+        "type": "string",
+        "default": "",
+        "hint": "必填项，请在 https://steamcommunity.com/dev/apikey 获取。若检测到旧版 steam_status_monitor_V3 配置且此处为空，首次启动会自动回填。"
+      },
+      "sgdb_api_key": {
+        "description": "SteamGridDB API Key（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "可选项，默认优先直连 Steam 官方 CDN 封面；填写后可按需增强竖版封面展示。"
+      },
+      "itad_api_key": {
+        "description": "IsThereAnyDeal API Key（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "可选项，用于商店查价时补充史低价格与跨区比价，可在 https://isthereanydeal.com/apps/ 获取。"
+      },
+      "poll_interval_seconds": {
+        "description": "全局轮询间隔（秒）",
+        "type": "int",
+        "default": 60,
+        "hint": "统一高频批量轮询所有已启用群监控玩家的间隔秒数，默认 60 秒（最低 30 秒）。"
+      },
+      "exit_debounce_seconds": {
+        "description": "退出防抖确认窗口（秒）",
+        "type": "int",
+        "default": 180,
+        "hint": "检测到离线或离开游戏后进入确认窗口，窗口内高频复查；默认 180 秒（3 分钟），避免网络波动误报退出。"
+      },
+      "retry_times": {
+        "description": "Steam API 请求重试次数",
+        "type": "int",
+        "default": 3,
+        "hint": "单次 API 请求失败后的最大重试次数，默认 3。"
+      },
+      "max_group_size": {
+        "description": "单群最大监控人数",
+        "type": "int",
+        "default": 30,
+        "hint": "单个群聊允许监控的 Steam 账号数量上限，默认 30。"
+      },
+      "enable_achievement_poll": {
+        "description": "全局启用成就解锁监控",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，在已开启成就推送的群中，玩家游戏期间定时检测新解锁成就并在结束后延迟补查一次。"
+      },
+      "achievement_poll_interval_seconds": {
+        "description": "成就检测间隔（秒）",
+        "type": "int",
+        "default": 180,
+        "hint": "游戏进行中检测新解锁成就的轮询间隔秒数，默认 180 秒。"
+      },
+      "enable_game_start_notify": {
+        "description": "发送开局通知",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后仅后台统计时长，不推送开始游玩通知。"
+      },
+      "enable_game_end_notify": {
+        "description": "发送结束通知",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后玩家退出游戏推送本次游玩时长卡片。"
+      },
+      "enable_network_fluctuation_notify": {
+        "description": "发送网络波动提醒",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关闭（波动恢复时静默合并回原会话，不打扰群聊）；开启后在退出确认期内重连同一游戏时发送提示。"
+      },
+      "notify_send_image": {
+        "description": "通知发送卡片图片",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后开局、结束、成就与排行通知使用 HTML/CSS 渲染卡片图片，失败时自动降级为纯文本。"
+      },
+      "notify_send_text": {
+        "description": "通知附带简短文案",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后发送简短文本摘要；与图片同时开启为图文消息，仅开启文本为纯文本通知。"
+      },
+      "game_filter_mode": {
+        "description": "游戏过滤模式",
+        "type": "string",
+        "default": "全部游戏",
+        "enum": [
+          "全部游戏",
+          "白名单",
+          "黑名单"
+        ],
+        "options": [
+          "全部游戏",
+          "白名单",
+          "黑名单"
+        ],
+        "hint": "全部游戏=监控所有游戏；白名单=仅播报列表中的 AppID；黑名单=列表中的 AppID 不播报。"
+      },
+      "game_filter_ids": {
+        "description": "过滤游戏 AppID 列表",
+        "type": "string",
+        "default": "",
+        "hint": "逗号分隔的 Steam AppID，例如 431960,730。"
+      },
+      "rank_push_hour": {
+        "description": "每日排行推送时间（小时，24小时制）",
+        "type": "int",
+        "default": 8,
+        "hint": "每日自动推送昨日排行榜的小时（0-23），默认 8。"
+      },
+      "rank_push_minute": {
+        "description": "每日排行推送时间（分钟）",
+        "type": "int",
+        "default": 30,
+        "hint": "每日自动推送昨日排行榜的分钟（0-59），默认 30（即 08:30）。"
+      },
+      "price_currency": {
+        "description": "查价主货币",
+        "type": "string",
+        "default": "CNY",
+        "options": [
+          "CNY",
+          "JPY",
+          "USD",
+          "EUR",
+          "GBP",
+          "KRW",
+          "RUB",
+          "UAH",
+          "TRY",
+          "PLN",
+          "BRL",
+          "INR",
+          "HKD"
+        ],
+        "hint": "商店查价卡片默认展示的主货币，默认 CNY。"
+      },
+      "price_region": {
+        "description": "查价主区",
+        "type": "string",
+        "default": "CN",
+        "options": [
+          "CN",
+          "US",
+          "JP",
+          "KR",
+          "RU",
+          "UA",
+          "TR",
+          "HK"
+        ],
+        "hint": "商店查价默认查询的 Steam 商店区，默认 CN。"
+      },
+      "price_compare_regions": {
+        "description": "跨区比价对比区",
+        "type": "string",
+        "default": "UA",
+        "options": [
+          "NONE",
+          "UA",
+          "US",
+          "JP",
+          "KR",
+          "RU",
+          "CN",
+          "TR",
+          "HK"
+        ],
+        "hint": "跨区比价参考区，支持逗号分隔多个区或设为 NONE 关闭对比。"
+      },
+      "enable_proxy": {
+        "description": "启用网络代理",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后 Steam / 商店 / SGDB / ITAD 请求均通过下方代理发出。"
+      },
+      "proxy_url": {
+        "description": "代理地址",
+        "type": "string",
+        "default": "",
+        "hint": "如 http://127.0.0.1:7890 或 socks5://127.0.0.1:7890。"
+      },
+      "steam_api_base": {
+        "description": "Steam Web API 反向代理地址（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "留空使用官方 https://api.steampowered.com。"
+      },
+      "steam_store_base": {
+        "description": "Steam 商店反向代理地址（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "留空使用官方 https://store.steampowered.com。"
+      },
+      "sgdb_api_base": {
+        "description": "SteamGridDB 反向代理地址（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "留空使用官方 https://www.steamgriddb.com。"
+      },
+      "itad_api_base": {
+        "description": "ITAD 反向代理地址（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "留空使用官方 https://api.isthereanydeal.com。"
+      },
+      "ssl_ca_file": {
+        "description": "自定义 CA 证书路径（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "填写 PEM 格式 CA 证书绝对路径；留空使用系统信任链。"
+      },
+      "cache_avatar_hours": {
+        "description": "头像缓存时间（小时）",
+        "type": "int",
+        "default": 24,
+        "hint": "0 表示永不过期，默认 24 小时。"
+      },
+      "cache_cover_hours": {
+        "description": "封面缓存时间（小时）",
+        "type": "int",
+        "default": 168,
+        "hint": "封面缓存有效期（小时），默认 168（7 天），0 表示永不过期。"
+      },
+      "detailed_poll_log": {
+        "description": "详细轮询日志",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后在控制台输出每轮批量轮询详情，默认关闭。"
       }
     }
   }

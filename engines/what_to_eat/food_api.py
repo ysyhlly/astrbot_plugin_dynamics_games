@@ -531,9 +531,17 @@ class FoodApiClient:
                 )
                 # 列出工具（可选，便于日志）
                 try:
-                    await client.list_tools_and_save()
+                    await asyncio.wait_for(
+                        client.list_tools_and_save(),
+                        timeout=self.timeout_seconds,
+                    )
                     names = [getattr(t, "name", "") for t in (client.tools or [])]
                     logger.info("HowToCook 远程 MCP 已连接，工具: %s", names)
+                except TimeoutError:
+                    logger.warning(
+                        "HowToCook 远程 MCP list_tools_and_save 超时 (%.1fs)，跳过工具列表缓存",
+                        self.timeout_seconds,
+                    )
                 except Exception:
                     pass
                 self._remote_client = client

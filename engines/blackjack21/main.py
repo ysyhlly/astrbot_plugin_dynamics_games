@@ -258,12 +258,39 @@ class Blackjack21Plugin(Component):
             self._room_locks[room_key] = lock
         return lock
 
+    def _cleanup_room_lock(self, room_key: str) -> None:
+        """Reclaim per-room lock after the room has ended/settled and no holder remains."""
+        if room_key in self.rooms:
+            return
+        lock = self._room_locks.get(room_key)
+        if lock is not None and not lock.locked():
+            self._room_locks.pop(room_key, None)
+
+    def _is_in_quiet_hours(self) -> bool:
+        ctx = getattr(self, "context", None)
+        if ctx is None:
+            return False
+        try:
+            from ...series_panels import is_series_in_quiet_hours
+
+            return bool(is_series_in_quiet_hours(ctx))
+        except Exception:
+            return False
+
     async def terminate(self):
-        """Cancel pending timers on unload."""
+        """Cancel pending timers on unload and clear rooms and locks."""
+        cancelled: list[asyncio.Task] = []
         for rkey in list(self.round_tasks):
-            self._cancel_round_timer(rkey)
+            task = self._cancel_round_timer(rkey)
+            if task is not None:
+                cancelled.append(task)
         for rkey in list(self.waiting_tasks):
-            self._cancel_waiting_timer(rkey)
+            task = self._cancel_waiting_timer(rkey)
+            if task is not None:
+                cancelled.append(task)
+        if cancelled:
+            await asyncio.gather(*cancelled, return_exceptions=True)
+        self.rooms.clear()
         self._room_locks.clear()
 
     def _mute_per_point(self) -> int:
@@ -376,10 +403,16 @@ class Blackjack21Plugin(Component):
     async def _send_group(self, room: Room, result: MessageEventResult) -> None:
         """Send a built result to the group via stored event or OneBot fallback.
 
+        Suppressed during series quiet hours so background timeout broadcasts
+        never wake up the group.
+
         Args:
             room: Room whose last event / bot is used to send.
             result: Prebuilt message chain to deliver.
         """
+        if self._is_in_quiet_hours():
+            logger.debug("静默时段内抑制21点房间主动播报 room=%s", room.room_key)
+            return
         event = room.reply_event
         if event is not None:
             try:
@@ -418,32 +451,34 @@ class Blackjack21Plugin(Component):
             p for p in self._active_players(room) if p.user_id not in room.round_actions
         ]
 
-    def _cancel_round_timer(self, room_key: str) -> None:
-        """Cancel pending round timer.
+    def _cancel_round_timer(self, room_key: str) -> asyncio.Task | None:
+        """Cancel pending round timer; return the cancelled task if any.
 
         If called from inside the timer task itself, only detach it from the
         map — cancelling the running task would abort settle/ban/send.
         """
         task = self.round_tasks.pop(room_key, None)
         if not task or task.done():
-            return
+            return None
         try:
             if task is asyncio.current_task():
-                return
+                return None
         except RuntimeError:
             pass
         task.cancel()
+        return task
 
-    def _cancel_waiting_timer(self, room_key: str) -> None:
+    def _cancel_waiting_timer(self, room_key: str) -> asyncio.Task | None:
         task = self.waiting_tasks.pop(room_key, None)
         if not task or task.done():
-            return
+            return None
         try:
             if task is asyncio.current_task():
-                return
+                return None
         except RuntimeError:
             pass
         task.cancel()
+        return task
 
     def _arm_waiting_timer(self, room: Room) -> None:
         """Auto-close room if still waiting after timeout."""
@@ -456,16 +491,21 @@ class Blackjack21Plugin(Component):
                 await asyncio.sleep(timeout)
             except asyncio.CancelledError:
                 return
+            room_now: Room | None = None
+            result: MessageEventResult | None = None
             async with self._room_lock(room_key):
                 room_now = self.rooms.get(room_key)
                 if not room_now or room_now.phase != "waiting":
-                    return
-                self.rooms.pop(room_key, None)
-                self.waiting_tasks.pop(room_key, None)
-                result = self._result(
-                    f"⏰ 21点房间创建后 {timeout // 60} 分钟仍未开始，已自动关闭。"
-                )
-            await self._send_group(room_now, result)
+                    room_now = None
+                else:
+                    self.rooms.pop(room_key, None)
+                    self.waiting_tasks.pop(room_key, None)
+                    result = self._result(
+                        f"⏰ 21点房间创建后 {timeout // 60} 分钟仍未开始，已自动关闭。"
+                    )
+            self._cleanup_room_lock(room_key)
+            if room_now is not None and result is not None:
+                await self._send_group(room_now, result)
 
         self.waiting_tasks[room_key] = asyncio.create_task(_on_waiting_timeout())
 
@@ -480,11 +520,21 @@ class Blackjack21Plugin(Component):
         async def _on_timeout() -> None:
             try:
                 await asyncio.sleep(timeout)
+                room_to_send: Room | None = None
+                result: MessageEventResult | None = None
+                pending_outcome: dict[str, Any] | None = None
                 async with self._room_lock(room_key):
                     room_now = self.rooms.get(room_key)
                     if room_now is not None and bot is not None and room_now.bot is None:
                         room_now.bot = bot
-                    await self._handle_round_timeout(room_key, round_no)
+                    room_to_send, result, pending_outcome = (
+                        await self._handle_round_timeout_locked(room_key, round_no)
+                    )
+                self._cleanup_room_lock(room_key)
+                if pending_outcome is not None:
+                    await self._emit_outcome(pending_outcome)
+                if room_to_send is not None and result is not None:
+                    await self._send_group(room_to_send, result)
             except asyncio.CancelledError:
                 return
             except Exception as exc:  # noqa: BLE001
@@ -767,8 +817,20 @@ class Blackjack21Plugin(Component):
             self._clear_all_stands(room, parts)
         return parts
 
-    async def _settle(self, room: Room) -> list[Any]:
-        """Settle scores and mute non-first players."""
+    async def _emit_outcome(self, payload: dict[str, Any] | None) -> None:
+        """Invoke cross-plugin outcome callback safely outside the room lock."""
+        if not payload:
+            return
+        cb = getattr(self, "outcome_callback", None)
+        if not callable(cb):
+            return
+        try:
+            await cb(**payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("21点结果同步失败: %s", exc)
+
+    async def _settle_locked(self, room: Room) -> tuple[list[Any], dict[str, Any] | None]:
+        """Settle scores and mute non-first players under room lock; return (parts, outcome_kwargs)."""
         self._cancel_round_timer(room.room_key)
         players = list(room.players.values())
         winners = self._pick_winners(players)
@@ -804,43 +866,47 @@ class Blackjack21Plugin(Component):
         room.phase = "finished"
         self._cancel_waiting_timer(room.room_key)
         self.rooms.pop(room.room_key, None)
-        cb = getattr(self, "outcome_callback", None)
-        if callable(cb) and players:
-            try:
-                cb_kwargs: dict[str, Any] = {
-                    "event": room.reply_event,
-                    "group_id": str(room.group_id),
-                    "game_key": "blackjack21",
-                    "title": "21点对局",
-                    "rounds": max(1, int(room.round_no)),
-                    "participants": [
-                        {
-                            "uid": str(p.user_id),
-                            "name": str(p.user_id),
-                            "role_weight": 3 if p.user_id in winner_ids else 1,
-                        }
-                        for p in players
-                    ],
-                    "summary": f"21点对局结算（共 {max(1, int(room.round_no))} 轮，{len(players)} 人参与），本局第一点数 {winner_score} 点。",
-                }
-                if ":" in room.room_key:
-                    cb_kwargs["umo"] = room.room_key
-                await cb(**cb_kwargs)
-            except Exception as exc:
-                logger.warning("21点结果同步失败: %s", exc)
+
+        outcome_payload: dict[str, Any] | None = None
+        if callable(getattr(self, "outcome_callback", None)) and players:
+            outcome_payload = {
+                "event": room.reply_event,
+                "group_id": str(room.group_id),
+                "game_key": "blackjack21",
+                "title": "21点对局",
+                "rounds": max(1, int(room.round_no)),
+                "participants": [
+                    {
+                        "uid": str(p.user_id),
+                        "name": str(p.user_id),
+                        "role_weight": 3 if p.user_id in winner_ids else 1,
+                    }
+                    for p in players
+                ],
+                "summary": f"21点对局结算（共 {max(1, int(room.round_no))} 轮，{len(players)} 人参与），本局第一点数 {winner_score} 点。",
+            }
+            if ":" in room.room_key:
+                outcome_payload["umo"] = room.room_key
+        return parts, outcome_payload
+
+    async def _settle(self, room: Room) -> list[Any]:
+        """Settle scores and emit outcome (compatibility helper for direct callers)."""
+        parts, payload = await self._settle_locked(room)
+        await self._emit_outcome(payload)
         return parts
 
     async def _advance_after_full_round(
         self, room: Room, head: list[Any]
-    ) -> MessageEventResult:
+    ) -> tuple[MessageEventResult, dict[str, Any] | None]:
         """Resolve current round after everyone has chosen (or timed out)."""
         parts: list[Any] = list(head)
         parts.extend(await self._resolve_round(room))
 
         if not self._active_players(room):
             parts.append("\n")
-            parts.extend(await self._settle(room))
-            return self._result(*parts)
+            settle_parts, outcome_payload = await self._settle_locked(room)
+            parts.extend(settle_parts)
+            return self._result(*parts), outcome_payload
 
         self._begin_round(room)
         parts.extend(
@@ -850,9 +916,11 @@ class Blackjack21Plugin(Component):
             ]
         )
         parts.extend(self._room_parts(room))
-        return self._result(*parts)
+        return self._result(*parts), None
 
-    async def _after_choice(self, room: Room, head: list[Any]) -> MessageEventResult:
+    async def _after_choice(
+        self, room: Room, head: list[Any]
+    ) -> tuple[MessageEventResult, dict[str, Any] | None]:
         """Handle post-choice: wait for others, or resolve round / settle."""
         # Last player to choose: skip the pre-resolve room snapshot (too noisy).
         if not self._waiting_players(room):
@@ -865,10 +933,12 @@ class Blackjack21Plugin(Component):
         parts.extend(self._room_parts(room))
         parts.append("⏳ 还在等：")
         parts.extend(self._join_ats(self._waiting_players(room)))
-        return self._result(*parts)
+        return self._result(*parts), None
 
-    async def _handle_round_timeout(self, room_key: str, round_no: int) -> None:
-        """Auto-stand waiting players and resolve the round."""
+    async def _handle_round_timeout_locked(
+        self, room_key: str, round_no: int
+    ) -> tuple[Room | None, MessageEventResult | None, dict[str, Any] | None]:
+        """Auto-stand waiting players and resolve round under lock; defer I/O outside lock."""
         # Detach this timer from the map first (do not cancel self).
         self.round_tasks.pop(room_key, None)
 
@@ -880,11 +950,11 @@ class Blackjack21Plugin(Component):
                 round_no,
                 getattr(room, "phase", None),
             )
-            return
+            return None, None, None
         waiting = self._waiting_players(room)
         if not waiting:
             logger.info("21点超时但无人待操作 room=%s round=%s", room_key, round_no)
-            return
+            return None, None, None
 
         logger.info(
             "21点回合超时自动停手 room=%s round=%s users=%s",
@@ -898,8 +968,18 @@ class Blackjack21Plugin(Component):
         head: list[Any] = ["⏰ 本轮超时，未操作视为停手："]
         head.extend(self._join_ats(waiting))
         head.append("\n")
-        result = await self._advance_after_full_round(room, head)
-        await self._send_group(room, result)
+        result, outcome_payload = await self._advance_after_full_round(room, head)
+        return room, result, outcome_payload
+
+    async def _handle_round_timeout(self, room_key: str, round_no: int) -> None:
+        """Auto-stand waiting players, resolve round, then emit outcome and broadcast."""
+        room, result, outcome_payload = await self._handle_round_timeout_locked(
+            room_key, round_no
+        )
+        if outcome_payload is not None:
+            await self._emit_outcome(outcome_payload)
+        if room is not None and result is not None:
+            await self._send_group(room, result)
 
     async def cmd_help(self, event: AstrMessageEvent):
         """Show blackjack rules and command list."""
@@ -979,6 +1059,7 @@ class Blackjack21Plugin(Component):
             yield event.plain_result("21点只能在群里玩。")
             return
 
+        pending_outcome: dict[str, Any] | None = None
         async with self._room_lock(room_key):
             room = self.rooms.get(room_key)
             if not room or room.phase != "waiting":
@@ -1007,9 +1088,10 @@ class Blackjack21Plugin(Component):
                             p.stood = True
 
                     if not self._active_players(room):
+                        settle_parts, pending_outcome = await self._settle_locked(room)
                         reply = self._result(
                             "🃏 开局后无人可继续操作。\n\n",
-                            *(await self._settle(room)),
+                            *settle_parts,
                         )
                     else:
                         self._begin_round(room, bot=room.bot)
@@ -1029,11 +1111,15 @@ class Blackjack21Plugin(Component):
                             "请发 /要牌 或 /停牌\n",
                             *self._room_parts(room),
                         )
+        self._cleanup_room_lock(room_key)
+        if pending_outcome is not None:
+            await self._emit_outcome(pending_outcome)
         yield reply
 
     async def cmd_hit(self, event: AstrMessageEvent):
         """Choose to draw one card this round (resolved when all have chosen)."""
         room_key, _ = self._room_key(event)
+        pending_outcome: dict[str, Any] | None = None
         async with self._room_lock(room_key):
             room = self.rooms.get(room_key)
             if not room or room.phase != "playing":
@@ -1055,15 +1141,19 @@ class Blackjack21Plugin(Component):
                     )
                 else:
                     room.round_actions[uid] = "hit"
-                    reply = await self._after_choice(
+                    reply, pending_outcome = await self._after_choice(
                         room,
                         ["📝 ", player, " 本轮选择：要牌（等全员选完再发）"],
                     )
+        self._cleanup_room_lock(room_key)
+        if pending_outcome is not None:
+            await self._emit_outcome(pending_outcome)
         yield reply
 
     async def cmd_stand(self, event: AstrMessageEvent):
         """Choose to stand this round (permanent once the round resolves)."""
         room_key, _ = self._room_key(event)
+        pending_outcome: dict[str, Any] | None = None
         async with self._room_lock(room_key):
             room = self.rooms.get(room_key)
             if not room or room.phase != "playing":
@@ -1083,10 +1173,13 @@ class Blackjack21Plugin(Component):
                     )
                 else:
                     room.round_actions[uid] = "stand"
-                    reply = await self._after_choice(
+                    reply, pending_outcome = await self._after_choice(
                         room,
                         ["📝 ", player, " 本轮选择：停手（确认后本局不能再要）"],
                     )
+        self._cleanup_room_lock(room_key)
+        if pending_outcome is not None:
+            await self._emit_outcome(pending_outcome)
         yield reply
 
     async def cmd_status(self, event: AstrMessageEvent):
@@ -1099,11 +1192,13 @@ class Blackjack21Plugin(Component):
             else:
                 self._bind_event(room, event)
                 reply = self._result(*self._room_parts(room))
+        self._cleanup_room_lock(room_key)
         yield reply
 
     async def cmd_end(self, event: AstrMessageEvent):
         """Room admin cancels the room."""
         room_key, _ = self._room_key(event)
+        cancelled: list[asyncio.Task] = []
         async with self._room_lock(room_key):
             room = self.rooms.get(room_key)
             if not room:
@@ -1113,8 +1208,15 @@ class Blackjack21Plugin(Component):
                 if uid != room.host_id and not event.is_admin():
                     reply = event.plain_result("只有本局管理员（或机器人管理员）能结束房间。")
                 else:
-                    self._cancel_round_timer(room_key)
-                    self._cancel_waiting_timer(room_key)
+                    t_round = self._cancel_round_timer(room_key)
+                    t_wait = self._cancel_waiting_timer(room_key)
+                    if t_round is not None:
+                        cancelled.append(t_round)
+                    if t_wait is not None:
+                        cancelled.append(t_wait)
                     self.rooms.pop(room_key, None)
                     reply = event.plain_result("21点房间已结束。")
+        if cancelled:
+            await asyncio.gather(*cancelled, return_exceptions=True)
+        self._cleanup_room_lock(room_key)
         yield reply

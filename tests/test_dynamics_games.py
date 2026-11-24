@@ -411,9 +411,10 @@ def test_package_integrity_schema_and_zero_engine_decorators():
         "blackjack21",
         "rollpig",
         "what_to_eat",
+        "steam_monitor",
     }
     assert set(schema.keys()) == expected_sections
-    assert len(LEGACY_PLUGIN_IDS) == 4
+    assert len(LEGACY_PLUGIN_IDS) == 5
     assert not (PLUGIN_ROOT / "pages" / "affinity").exists()
 
     # 2. ConfigSection isolates writes without losing root persistence hook

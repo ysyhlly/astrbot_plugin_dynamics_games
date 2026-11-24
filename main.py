@@ -13,7 +13,7 @@ ensure_current(
         ("core.coordinator", "ActivityCoordinator", "sync_outcome_records"),
         ("core.store", "ActivityStore", "save_completion"),
     ],
-    version="0.1.1-rc.6",
+    version="0.1.2-rc.1",
 )
 
 import asyncio
@@ -63,6 +63,7 @@ from .engines.rollpig.main import (
 from .engines.rollpig.main import (
     RollPigPlugin as RollPigEngine,
 )
+from .engines.steam_monitor.main import SteamMonitorEngine
 from .engines.truth_game.main import TruthGamePlugin as TruthGameEngine
 from .engines.what_to_eat.main import WhatToEatPlugin as WhatToEatEngine
 from .runtime import LEGACY_PLUGIN_IDS, PLUGIN_ID, ConfigSection, EngineContext
@@ -78,13 +79,14 @@ LEGACY_ENGINE_PLUGIN_MAP: dict[str, str] = {
     "blackjack21": "astrbot_plugin_blackjack21",
     "rollpig": "astrbot_plugin_rollpig",
     "what_to_eat": "astrbot_plugin_what_to_eat",
+    "steam_monitor": "steam_status_monitor_V3",
 }
 
 
 class DynamicsGamesPlugin(Star):
     """群间游戏：组织共读、游戏约局、接龙创作、小型挑战、共同制作作品与群聊娱乐引擎总成。"""
 
-    VERSION = "0.1.1-rc.6"
+    VERSION = "0.1.2-rc.1"
     name = PLUGIN_ID
     author = "ysyhlly"
     plugin_id = f"ysyhlly/{PLUGIN_ID}"
@@ -186,6 +188,7 @@ class DynamicsGamesPlugin(Star):
                 ("blackjack21", Blackjack21Engine),
                 ("rollpig", RollPigEngine),
                 ("what_to_eat", WhatToEatEngine),
+                ("steam_monitor", SteamMonitorEngine),
             )
             for key, cls in engine_builders:
                 sec = self._section(key)
@@ -206,7 +209,7 @@ class DynamicsGamesPlugin(Star):
             )
             self._ready = True
             logger.info(
-                "[DynamicsGames] 群间游戏 v%s 初始化完成（协作活动库 + 4 大娱乐引擎已就绪）",
+                "[DynamicsGames] 群间游戏 v%s 初始化完成（协作活动库 + 5 大娱乐引擎已就绪）",
                 self.VERSION,
             )
         except BaseException:
@@ -283,6 +286,204 @@ class DynamicsGamesPlugin(Star):
         return series_panels.is_series_group_excluded(
             getattr(self, "context", None), umo=umo, group_id=gid
         )
+
+    def _is_in_quiet_hours(self) -> bool:
+        return series_panels.is_series_in_quiet_hours(getattr(self, "context", None))
+
+    def _can_proactive_broadcast(self, *, umo: str = "", group_id: str = "") -> bool:
+        """Gate helper for background/timeout proactive broadcasts."""
+        if self._closed or not self._ready or self._legacy_conflicts:
+            return False
+        if (umo or group_id) and series_panels.is_series_group_excluded(
+            getattr(self, "context", None), umo=umo, group_id=group_id
+        ):
+            return False
+        return not self._is_in_quiet_hours()
+
+    def _guard_event(
+        self,
+        event: AstrMessageEvent | None,
+        key: str,
+        *,
+        explicit: bool,
+    ) -> tuple[Any | None, Any | None]:
+        """Unified event gating distinguishing explicit commands from passive listeners.
+
+        - Explicit commands: check legacy conflicts, readiness, and module toggle
+          (return user-facing notice when blocked, never silently suppressed by
+          quiet_hours or passive exclude_groups).
+        - Passive listeners: silently drop when not ready, disabled, excluded by
+          Chat Dynamics ``exclude_groups``, or during ``quiet_hours``.
+        """
+        if explicit:
+            if self._legacy_conflicts:
+                if LEGACY_ENGINE_PLUGIN_MAP.get(key) in self._legacy_conflicts:
+                    return None, None
+                conflicts = "、".join(self._legacy_conflicts)
+                return None, (
+                    event.plain_result(
+                        f"群间游戏当前因检测到旧版独立插件（{conflicts}）处于待机模式，停用旧插件并重载后即可启用。"
+                    )
+                    if event is not None
+                    else None
+                )
+            if not self._ready or self._closed:
+                return None, (
+                    event.plain_result("群间游戏尚未就绪，请稍后再试。")
+                    if event is not None
+                    else None
+                )
+            if not self.module_enabled(key):
+                return None, (
+                    self._disabled_reply(event, key) if event is not None else None
+                )
+            eng = self.engines.get(key)
+            if eng is None:
+                return None, (
+                    event.plain_result("群间游戏尚未就绪，请稍后再试。")
+                    if event is not None
+                    else None
+                )
+            return eng, None
+
+        if (
+            not self._ready
+            or self._closed
+            or self._legacy_conflicts
+            or not self.module_enabled(key)
+        ):
+            return None, None
+        if self._is_event_excluded_by_core(event):
+            return None, None
+        if self._is_in_quiet_hours():
+            return None, None
+        return self.engines.get(key), None
+
+    def _guard_passive_event(
+        self, event: AstrMessageEvent | None, key: str
+    ) -> Any | None:
+        eng, _ = self._guard_event(event, key, explicit=False)
+        return eng
+
+    def get_series_health(self) -> dict[str, Any]:
+        """Strictly synchronous, read-only health diagnostics for series panel."""
+        providers: list[dict[str, Any]] = []
+        issues: list[str] = []
+        metrics: dict[str, Any] = {}
+        ready = bool(
+            self._ready
+            and not self._closed
+            and not self._legacy_conflicts
+            and self.store is not None
+        )
+        if self._legacy_conflicts:
+            issues.append(f"检测到旧版娱乐插件冲突: {', '.join(self._legacy_conflicts)}")
+        elif self._closed:
+            issues.append("群间游戏已关闭")
+        elif not self._ready or self.store is None:
+            issues.append("群间游戏尚未就绪")
+
+        ctx = getattr(self, "context", None)
+
+        def _inspect_provider(
+            role: str, explicit: str, enabled: bool, disabled_detail: str
+        ) -> None:
+            if not enabled:
+                providers.append(
+                    {
+                        "role": role,
+                        "provider_id": str(explicit or "").strip(),
+                        "status": "disabled",
+                        "detail": disabled_detail,
+                    }
+                )
+                return
+            own = str(explicit or "").strip()
+            resolved = series_panels.resolve_series_provider(ctx, own, role="reply")
+            if not resolved:
+                providers.append(
+                    {
+                        "role": role,
+                        "provider_id": "",
+                        "status": "session_default",
+                        "detail": "跟随会话默认模型",
+                    }
+                )
+                return
+            prov = series_panels.find_provider_silently(ctx, resolved)
+            if prov is not None:
+                providers.append(
+                    {
+                        "role": role,
+                        "provider_id": resolved,
+                        "status": "ok",
+                        "detail": "显式配置可用" if own else "继承主控回复模型可用",
+                    }
+                )
+            else:
+                providers.append(
+                    {
+                        "role": role,
+                        "provider_id": resolved,
+                        "status": "missing",
+                        "detail": "未在已加载 Provider 中找到（可能冷启动或已移除）",
+                    }
+                )
+                issues.append(f"{role} 配置的 Provider 不可用: {resolved}")
+
+        raw_cfg = self.raw_config if isinstance(self.raw_config, dict) else {}
+        wte_cfg = raw_cfg.get("what_to_eat")
+        if not isinstance(wte_cfg, dict):
+            wte_cfg = {}
+        wte_enabled = self.module_enabled("what_to_eat") and bool(
+            wte_cfg.get("llm_enabled", True)
+        )
+        _inspect_provider(
+            "what_to_eat_llm",
+            str(wte_cfg.get("llm_provider_id", "") or ""),
+            wte_enabled,
+            "吃什么模块或 LLM 未启用",
+        )
+
+        tg_cfg = raw_cfg.get("truth_game")
+        if not isinstance(tg_cfg, dict):
+            tg_cfg = {}
+        tg_source = str(tg_cfg.get("question_source", "llm_first") or "llm_first")
+        tg_enabled = self.module_enabled("truth_game") and tg_source != "bank_only"
+        _inspect_provider(
+            "truth_game_llm",
+            str(tg_cfg.get("llm_provider_id", "") or ""),
+            tg_enabled,
+            "真心话模块关闭或仅题库模式",
+        )
+
+        try:
+            tg_eng = self.engines.get("truth_game")
+            bj_eng = self.engines.get("blackjack21")
+            active_tg = len(
+                getattr(getattr(tg_eng, "room_manager", None), "rooms", {}) or {}
+            )
+            active_bj = len(getattr(bj_eng, "rooms", {}) or {})
+            metrics["active_rooms"] = active_tg + active_bj
+            metrics["modules_enabled"] = sum(
+                1 for v in self.module_states().values() if v
+            )
+            if self.store is not None and not self._closed:
+                stats = self.store.stats_summary()
+                metrics["open_activities"] = int(stats.get("open_activities") or 0)
+                metrics["completed_activities"] = int(
+                    stats.get("completed_activities") or 0
+                )
+        except Exception:
+            pass
+
+        return {
+            "ready": ready,
+            "degraded": bool(issues) or not ready,
+            "providers": providers,
+            "issues": issues,
+            "metrics": metrics,
+        }
 
     @classmethod
     def _iso_time(cls, ts: float | None = None, *, tz=None) -> str:
@@ -614,6 +815,44 @@ class DynamicsGamesPlugin(Star):
             return "群间游戏尚未初始化。"
         return await handle_detail_command(self.coordinator, event, activity_id)
 
+    @filter.llm_tool(name="get_group_steam_status")
+    async def get_group_steam_status(self, event: AstrMessageEvent) -> str:
+        """只读查询当前群 Steam 监控群友的实时游戏状态（谁正在玩什么游戏、在线人数等）。"""
+        if not self._ready or not self.module_enabled("steam_monitor"):
+            return json.dumps({"available": False, "reason": "disabled"}, ensure_ascii=False)
+        eng = self.engines.get("steam_monitor")
+        if eng is None:
+            return json.dumps({"available": False, "reason": "not_loaded"}, ensure_ascii=False)
+        gid = str(getattr(event, "get_group_id", lambda: "")() or "").strip()
+        if not gid:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            if ":GroupMessage:" in umo:
+                gid = umo.rsplit(":", 1)[-1].strip()
+        data = await eng.get_group_steam_status_summary(gid)
+        return json.dumps(data, ensure_ascii=False)
+
+    @filter.llm_tool(name="get_group_steam_rank")
+    async def get_group_steam_rank(
+        self, event: AstrMessageEvent, days: int = 1
+    ) -> str:
+        """只读查询当前群群友最近若干自然日内的 Steam 游戏时长排行榜。
+
+        Args:
+            days(number): 可选。统计天数（1=今日，7=近7日，30=近30日，默认 1）。
+        """
+        if not self._ready or not self.module_enabled("steam_monitor"):
+            return json.dumps({"available": False, "reason": "disabled"}, ensure_ascii=False)
+        eng = self.engines.get("steam_monitor")
+        if eng is None:
+            return json.dumps({"available": False, "reason": "not_loaded"}, ensure_ascii=False)
+        gid = str(getattr(event, "get_group_id", lambda: "")() or "").strip()
+        if not gid:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            if ":GroupMessage:" in umo:
+                gid = umo.rsplit(":", 1)[-1].strip()
+        data = await eng.get_group_steam_rank_summary(gid, days=days)
+        return json.dumps(data, ensure_ascii=False)
+
     # ------------------------------------------------------------------
     # Layer 1: Unified Collaborative Activity Commands (/活动 | /群间游戏 | /共创)
     # ------------------------------------------------------------------
@@ -837,28 +1076,8 @@ class DynamicsGamesPlugin(Star):
     def _guard_engine(
         self, event: AstrMessageEvent, key: str
     ) -> tuple[Any | None, Any | None]:
-        """Return ``(engine, None)`` when ready and enabled, else ``(None, optional_reply)``.
-
-        When legacy standalone game plugins put Dynamics Games into standby mode,
-        return silently for the conflicting engine (so the legacy plugin handles the
-        command without duplicate replies) and return a friendly standby notice for
-        other engines instead of raising ``KeyError`` on an empty ``self.engines``.
-        """
-        if self._legacy_conflicts:
-            if LEGACY_ENGINE_PLUGIN_MAP.get(key) in self._legacy_conflicts:
-                return None, None
-            conflicts = "、".join(self._legacy_conflicts)
-            return None, event.plain_result(
-                f"群间游戏当前因检测到旧版独立插件（{conflicts}）处于待机模式，停用旧插件并重载后即可启用。"
-            )
-        if not self._ready or self._closed:
-            return None, event.plain_result("群间游戏尚未就绪，请稍后再试。")
-        if not self.module_enabled(key):
-            return None, self._disabled_reply(event, key)
-        eng = self.engines.get(key)
-        if eng is None:
-            return None, event.plain_result("群间游戏尚未就绪，请稍后再试。")
-        return eng, None
+        """Return ``(engine, None)`` when ready and enabled, else ``(None, optional_reply)``."""
+        return self._guard_event(event, key, explicit=True)
 
     # ------------------------------------------------------------------
     # Engine 1: 真心话 (truth_game)
@@ -973,9 +1192,7 @@ class DynamicsGamesPlugin(Star):
 
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     async def tg_on_group_message(self, event: AstrMessageEvent):
-        if not self._ready or self._closed or not self.module_enabled("truth_game"):
-            return
-        eng = self.engines.get("truth_game")
+        eng = self._guard_passive_event(event, "truth_game")
         if eng is not None:
             async for r in eng.on_group_message(event):
                 yield r
@@ -1086,14 +1303,7 @@ class DynamicsGamesPlugin(Star):
 
     @filter.regex(ROLLPIG_WAKE_FREE_PATTERN)
     async def rp_roll_pig_wake_free(self, event: AstrMessageEvent):
-        if (
-            not self._ready
-            or self._closed
-            or not self.module_enabled("rollpig")
-            or self._is_event_excluded_by_core(event)
-        ):
-            return
-        eng = self.engines.get("rollpig")
+        eng = self._guard_passive_event(event, "rollpig")
         if eng is not None:
             await eng.roll_pig_wake_free(event)
 
@@ -1157,14 +1367,368 @@ class DynamicsGamesPlugin(Star):
 
     @filter.event_message_type(EventMessageType.ALL)
     async def wte_on_message(self, event: AstrMessageEvent, *args, **kwargs):
-        if (
-            not self._ready
-            or self._closed
-            or not self.module_enabled("what_to_eat")
-            or self._is_event_excluded_by_core(event)
-        ):
-            return
-        eng = self.engines.get("what_to_eat")
+        eng = self._guard_passive_event(event, "what_to_eat")
         if eng is not None:
             async for r in eng.on_what_to_eat(event, *args, **kwargs):
+                yield r
+
+    # ------------------------------------------------------------------
+    # Engine 5: Steam 状态监控 (steam_monitor)
+    # ------------------------------------------------------------------
+    @filter.command_group("steam")
+    def steam_group(self):
+        """Steam 状态监控、成就推送、自然日时长排行与商店查价"""
+        pass
+
+    @steam_group.command("help", alias={"帮助", "说明"})
+    async def sm_help(self, event: AstrMessageEvent):
+        """查看 Steam 状态监控指令说明"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        async for r in eng.cmd_help(event):
+            yield r
+
+    @steam_group.command("list", alias={"状态", "列表"})
+    async def sm_list(self, event: AstrMessageEvent):
+        """查看本群 Steam 监控玩家实时状态"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        async for r in eng.cmd_list(event):
+            yield r
+
+    @steam_group.command("who", alias={"查人"})
+    async def sm_who(self, event: AstrMessageEvent, target: str = ""):
+        """查询指定群友当前 Steam 状态"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("who", "查人"), target)
+        async for r in eng.cmd_who(event, raw):
+            yield r
+
+    @filter.command("steamwho", alias={"在干嘛"})
+    async def sm_steamwho(self, event: AstrMessageEvent, target: str = ""):
+        """即时查询指定群友（或自己）当前 Steam 游戏状态"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("steamwho", "在干嘛"), target)
+        async for r in eng.cmd_who(event, raw):
+            yield r
+
+    @steam_group.command("rank", alias={"排行", "排行榜"})
+    async def sm_rank(self, event: AstrMessageEvent, period: str = ""):
+        """查看本群 Steam 游玩时长排行榜"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("rank", "排行榜", "排行"), period)
+        async for r in eng.cmd_rank(event, raw):
+            yield r
+
+    @steam_group.command("price", alias={"查价", "价格"})
+    async def sm_price(self, event: AstrMessageEvent, query: str = ""):
+        """查询 Steam 游戏价格、史低与跨区比价"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("price", "查价", "价格"), query)
+        async for r in eng.cmd_price(event, raw, quick=False):
+            yield r
+
+    @steam_group.command("px")
+    async def sm_px(self, event: AstrMessageEvent, query: str = ""):
+        """快捷查价（直接返回首条匹配）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("px",), query)
+        async for r in eng.cmd_px(event, raw):
+            yield r
+
+    @steam_group.command("game", alias={"详情"})
+    async def sm_game(self, event: AstrMessageEvent, appid: str = ""):
+        """查询 Steam 游戏商店详情卡片"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("game", "详情"), appid)
+        async for r in eng.cmd_game(event, raw):
+            yield r
+
+    @steam_group.command("openbox", alias={"开盒"})
+    async def sm_openbox(self, event: AstrMessageEvent, target: str = ""):
+        """查看玩家 Steam 公开档案开盒卡片"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("openbox", "开盒"), target)
+        async for r in eng.cmd_openbox(event, raw):
+            yield r
+
+    @steam_group.command("bind", alias={"绑定"})
+    async def sm_bind(
+        self, event: AstrMessageEvent, steamid: str = "", nickname: str = ""
+    ):
+        """自助绑定自己的 SteamID 并加入本群监控"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("bind", "绑定"), steamid)
+        parts = raw.split(maxsplit=1) if raw else []
+        sid_arg = parts[0] if parts else steamid
+        nick_arg = parts[1] if len(parts) > 1 else nickname
+        async for r in eng.cmd_bind(event, sid_arg, nick_arg):
+            yield r
+
+    @steam_group.command("unbind", alias={"解绑"})
+    async def sm_unbind(self, event: AstrMessageEvent):
+        """解除自己的 QQ 与 SteamID 绑定"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        async for r in eng.cmd_unbind(event):
+            yield r
+
+    @steam_group.command("addid", alias={"添加"})
+    async def sm_addid(self, event: AstrMessageEvent, args: str = ""):
+        """添加 SteamID 到本群监控（普通成员仅限添加自己，管理员可批量/代绑他人）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("addid", "添加"), args)
+        async for r in eng.cmd_addid(event, raw):
+            yield r
+
+    @steam_group.command("delid", alias={"删除"})
+    async def sm_delid(
+        self, event: AstrMessageEvent, steamid: str = "", group_id: str = ""
+    ):
+        """从监控列表移除 SteamID（普通成员仅限移除自己绑定的 ID）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("delid", "删除"), steamid)
+        parts = raw.split(maxsplit=1) if raw else []
+        sid_arg = parts[0] if parts else steamid
+        gid_arg = parts[1] if len(parts) > 1 else group_id
+        async for r in eng.cmd_delid(event, sid_arg, gid_arg):
+            yield r
+
+    @steam_group.command("on", alias={"开启"})
+    async def sm_on(self, event: AstrMessageEvent):
+        """开启本群 Steam 状态监控推送（管理员）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        async for r in eng.cmd_on(event):
+            yield r
+
+    @steam_group.command("off", alias={"关闭"})
+    async def sm_off(self, event: AstrMessageEvent):
+        """关闭本群 Steam 状态监控推送（管理员）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        async for r in eng.cmd_off(event):
+            yield r
+
+    @steam_group.command("achievement_on")
+    async def sm_achievement_on(self, event: AstrMessageEvent):
+        """开启本群 Steam 成就推送（管理员）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        async for r in eng.cmd_achievement_on(event):
+            yield r
+
+    @steam_group.command("achievement_off")
+    async def sm_achievement_off(self, event: AstrMessageEvent):
+        """关闭本群 Steam 成就推送（管理员）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        async for r in eng.cmd_achievement_off(event):
+            yield r
+
+    @steam_group.command("rank_on")
+    async def sm_rank_on(self, event: AstrMessageEvent, param: str = ""):
+        """管理每日定时排行推送（管理员）：all|list|test|del"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("rank_on",), param)
+        async for r in eng.cmd_rank_on(event, raw):
+            yield r
+
+    @steam_group.command("push_group")
+    async def sm_push_group(self, event: AstrMessageEvent, steamid: str = ""):
+        """添加本群到指定 SteamID 的副群联动推送路由（管理员）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("push_group",), steamid)
+        async for r in eng.cmd_push_group(event, raw):
+            yield r
+
+    @steam_group.command("delpush_group")
+    async def sm_delpush_group(
+        self, event: AstrMessageEvent, steamid: str = "", target_group: str = ""
+    ):
+        """移除副群联动推送路由（管理员）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("delpush_group",), steamid)
+        parts = raw.split(maxsplit=1) if raw else []
+        sid_arg = parts[0] if parts else steamid
+        gid_arg = parts[1] if len(parts) > 1 else target_group
+        async for r in eng.cmd_delpush_group(event, sid_arg, gid_arg):
+            yield r
+
+    @steam_group.command("clear_groupids")
+    async def sm_clear_groupids(self, event: AstrMessageEvent, group_id: str = ""):
+        """清空指定群（默认本群）的监控列表（管理员）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("clear_groupids",), group_id)
+        async for r in eng.cmd_clear_groupids(event, raw):
+            yield r
+
+    @steam_group.command("clear_allids")
+    async def sm_clear_allids(self, event: AstrMessageEvent):
+        """清空所有群聊的监控列表与活跃状态（管理员）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        async for r in eng.cmd_clear_allids(event):
+            yield r
+
+    @steam_group.command("alllist")
+    async def sm_alllist(self, event: AstrMessageEvent, mode: str = "img"):
+        """查看全群监控玩家状态（管理员）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("alllist",), mode)
+        async for r in eng.cmd_alllist(event, raw or "img"):
+            yield r
+
+    @steam_group.command("allrank")
+    async def sm_allrank(self, event: AstrMessageEvent, period: str = ""):
+        """查看全群 Steam 游玩时长排行榜（管理员）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("allrank",), period)
+        async for r in eng.cmd_allrank(event, raw):
+            yield r
+
+    @steam_group.command("config")
+    async def sm_config(self, event: AstrMessageEvent):
+        """查看 Steam 监控当前配置（管理员，敏感信息自动脱敏）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        async for r in eng.cmd_config(event):
+            yield r
+
+    @steam_group.command("set")
+    async def sm_set(
+        self, event: AstrMessageEvent, key: str = "", value: str = ""
+    ):
+        """热更新 Steam 监控配置参数（管理员）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("set",), "")
+        parts = raw.split(maxsplit=1) if raw else []
+        k_arg = parts[0] if parts else key
+        v_arg = parts[1] if len(parts) > 1 else value
+        async for r in eng.cmd_set(event, k_arg, v_arg):
+            yield r
+
+    @steam_group.command("rs")
+    async def sm_rs(self, event: AstrMessageEvent):
+        """重置 Steam 监控运行状态并重新静默同步基线（管理员）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        async for r in eng.cmd_rs(event):
+            yield r
+
+    @steam_group.command("clear_cache", alias={"清除缓存"})
+    async def sm_clear_cache(self, event: AstrMessageEvent):
+        """清理 Steam 头像、封面与游戏名缓存（管理员）"""
+        eng, reply = self._guard_engine(event, "steam_monitor")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        async for r in eng.cmd_clear_cache(event):
+            yield r
+
+    @filter.event_message_type(EventMessageType.ALL)
+    async def sm_on_message(self, event: AstrMessageEvent):
+        """接收 Steam 商店查价的候选序号回复"""
+        eng = self._guard_passive_event(event, "steam_monitor")
+        if eng is not None:
+            async for r in eng.on_message(event):
                 yield r

@@ -48,8 +48,8 @@ async def test_truth_settlement_paths_share_one_durable_snapshot(tmp_path, endin
         round_idle_seconds=0.03 if ending == "idle" else 300,
         max_idle_rounds=1, max_questions_per_game=2 if ending == "max_questions" else 30,
     )
-    gid = host.get_group_id()
-    room_id = rooms.rooms[gid].room_id
+    rkey = host.unified_msg_origin
+    room_id = rooms.rooms[rkey].room_id
     try:
         if ending == "manual":
             denied = await cmd_end(rooms, player)
@@ -59,11 +59,11 @@ async def test_truth_settlement_paths_share_one_durable_snapshot(tmp_path, endin
         elif ending == "max_questions":
             assert "共进行了 2 轮" in (await cmd_next(rooms, player)).text()
         elif ending == "idle":
-            await asyncio.wait_for(rooms._idle_tasks[gid], 1)
+            await asyncio.wait_for(rooms._idle_tasks[rkey], 1)
         else:
             assert "共进行了 1 轮" in (await cmd_leave(rooms, player)).text()
 
-        assert gid not in rooms.rooms
+        assert rkey not in rooms.rooms
         assert store.pending_truth_rooms() == [room_id]
         assert not store.list_outcomes()
 
@@ -91,7 +91,8 @@ async def test_truth_local_materialization_and_remote_sync_retry(tmp_path, monke
     coordinator = ActivityCoordinator(store, None, {})
     rooms, host, _ = await started_room(coordinator)
     gid = host.get_group_id()
-    room_id = rooms.rooms[gid].room_id
+    rkey = host.unified_msg_origin
+    room_id = rooms.rooms[rkey].room_id
     await cmd_end(rooms, host)
     assert not (await rooms.next(gid, "100", True))[0]
 
@@ -117,7 +118,7 @@ async def test_truth_local_materialization_and_remote_sync_retry(tmp_path, monke
     assert first["occurred_at"] == retry["occurred_at"]
     assert retry["source_refs"] == []
     assert store.get_outcome(first["activity_id"])["memory_doc_id"] == 22
-    assert gid not in rooms.rooms
+    assert rkey not in rooms.rooms
 
 
 @pytest.mark.asyncio
@@ -126,25 +127,26 @@ async def test_truth_end_holds_completed_snapshot_until_handoff_is_durable(tmp_p
     coordinator = ActivityCoordinator(store, None, {"memory_sync_enabled": False})
     rooms, host, _ = await started_room(coordinator)
     gid = host.get_group_id()
-    room = rooms.rooms[gid]
+    rkey = host.unified_msg_origin
+    room = rooms.rooms[rkey]
     real_enqueue = store.enqueue_truth_room
 
     def fail_before_commit(_snapshot):
         raise sqlite3.OperationalError("injected handoff failure")
 
     monkeypatch.setattr(store, "enqueue_truth_room", fail_before_commit)
-    ok, status = await rooms.end(gid, "100", False)
+    ok, status = await rooms.end(rkey, "100", False)
     assert not ok and "暂未写入" in status["error"]
-    assert rooms.rooms[gid] is room and room.phase == "settled"
-    assert not (await rooms.start(gid, "100", False))[0]
-    assert not (await rooms.next(gid, "100", False))[0]
-    assert not rooms.create(gid, "100", "阿青")[0]
+    assert rooms.rooms[rkey] is room and room.phase == "settled"
+    assert not (await rooms.start(rkey, "100", False))[0]
+    assert not (await rooms.next(rkey, "100", False))[0]
+    assert not rooms.create(gid, "100", "阿青", umo=rkey)[0]
     assert not store.pending_truth_rooms()
 
     monkeypatch.setattr(store, "enqueue_truth_room", real_enqueue)
     await rooms.flush_outcomes()
     assert store.pending_truth_rooms() == [room.room_id]
-    assert gid not in rooms.rooms
+    assert rkey not in rooms.rooms
     await rooms.terminate()
 
 
@@ -177,13 +179,14 @@ async def test_same_group_number_on_another_adapter_cannot_access_truth_room(tmp
     coordinator = ActivityCoordinator(ActivityStore(tmp_path / "games.sqlite3"), None, {})
     rooms, host, _ = await started_room(coordinator)
     gid = host.get_group_id()
+    rkey = host.unified_msg_origin
     other = FakeEvent(uid="100", name="另一个适配器", is_admin=True,
                       umo=f"another-qq:GroupMessage:{gid}")
-    room = rooms.rooms[gid]
+    room = rooms.rooms[rkey]
     room.last_pair = ("100", "200")
     try:
-        for command in (cmd_create, cmd_join, cmd_start, cmd_next, cmd_skip, cmd_leave, cmd_end, cmd_status):
-            assert "没有可访问" in (await command(rooms, other)).text()
+        for command in (cmd_join, cmd_start, cmd_next, cmd_skip, cmd_leave, cmd_end, cmd_status):
+            assert "还没有" in (await command(rooms, other)).text()
         assert "真心话" in (await cmd_help(rooms, other)).text()
         for stage, uid, text, quote in (
             ("awaiting_asker_mode", "100", "自己出题", False),
@@ -196,10 +199,18 @@ async def test_same_group_number_on_another_adapter_cannot_access_truth_room(tmp
             ) is None
             assert room.round_stage == stage
         assert room.advance_count == 1 and len(room.asked_history) == 1
+
+        # Creating a room on the second adapter succeeds independently without blocking host's room.
+        created_other = await cmd_create(rooms, other)
+        assert "已创建" in created_other.text()
+        assert other.unified_msg_origin in rooms.rooms
+        assert rooms.rooms[rkey] is room
+
         assert "共进行了 1 轮" in (await cmd_end(rooms, host)).text()
         await coordinator.flush_truth_outcomes()
         assert len(coordinator.store.list_outcomes(umo=host.unified_msg_origin)) == 1
         assert not coordinator.store.list_outcomes(umo=other.unified_msg_origin)
+        assert other.unified_msg_origin in rooms.rooms
     finally:
         await rooms.terminate()
 

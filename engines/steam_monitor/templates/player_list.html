@@ -1,0 +1,349 @@
+{% extends "base.html" %}
+
+{% block extra_css %}
+.pl-title-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.pl-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pl-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: #ffffff;
+}
+.pl-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.pl-counters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.pl-section {
+  margin-bottom: 18px;
+}
+.pl-section:last-child {
+  margin-bottom: 0;
+}
+.pl-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pl-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+}
+.pl-row.ingame {
+  border-color: rgba(144, 186, 60, 0.35);
+  background: linear-gradient(90deg, rgba(144, 186, 60, 0.08) 0%, var(--bg-panel) 45%);
+}
+.pl-row.offline {
+  opacity: 0.85;
+}
+.pl-name-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.pl-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.pl-row.ingame .pl-name {
+  color: #d6f588;
+}
+.pl-detail {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pl-game-text {
+  color: var(--steam-green);
+  font-weight: 600;
+}
+.pl-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.pl-mini-cover {
+  width: 88px;
+  flex-shrink: 0;
+}
+.pl-mini-cover .cover-box {
+  border-radius: 5px;
+}
+.pl-mini-cover .cover-fallback-tag {
+  display: none;
+}
+.pl-mini-cover .cover-fallback-title {
+  font-size: 10px;
+}
+.pl-single-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.pl-single-top {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 16px;
+}
+.pl-single-game {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+  background: linear-gradient(135deg, rgba(144, 186, 60, 0.12), var(--bg-panel) 55%);
+  border: 1px solid rgba(144, 186, 60, 0.35);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+}
+{% endblock %}
+
+{% block content %}
+<div class="accent-bar{% if ingame_players %} ingame{% endif %}"></div>
+
+<div class="card-header">
+  <div class="pl-title-wrap">
+    <div class="pl-title-row">
+      <span class="pl-title">{{ title }}</span>
+      {% if group_label %}
+      <span class="badge badge-blue">{{ group_label }}</span>
+      {% endif %}
+    </div>
+    {% if subtitle %}
+    <div class="pl-subtitle">{{ subtitle }}</div>
+    {% endif %}
+  </div>
+
+  {% if not is_single %}
+  <div class="pl-counters num">
+    <span class="badge badge-ingame"><span class="dot ingame"></span>游戏中 {{ ingame_players | length }}</span>
+    <span class="badge badge-blue"><span class="dot online"></span>在线 {{ online_players | length }}</span>
+    <span class="badge badge-slate"><span class="dot offline"></span>离线 {{ offline_players | length }}</span>
+  </div>
+  {% endif %}
+</div>
+
+<div class="card-body">
+  {% if is_single and all_players %}
+    {% set p = all_players[0] %}
+    <div class="pl-single-card">
+      <div class="pl-single-top">
+        <div class="avatar-wrap lg">
+          <div class="avatar-box {{ p.bucket }}">
+            <span class="avatar-initial">{{ p.initial }}</span>
+            {% if p.avatar_url %}
+            <img class="avatar-img" src="{{ p.avatar_url }}" alt="{{ p.player_name }}" onerror="this.style.display='none'" />
+            {% endif %}
+          </div>
+          {% if p.avatar_frame_url %}
+          <img class="avatar-frame" src="{{ p.avatar_frame_url }}" alt="" onerror="this.style.display='none'" />
+          {% endif %}
+        </div>
+        <div style="min-width: 0; flex: 1;">
+          <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <span style="font-size: 22px; font-weight: 700; color: #fff;">{{ p.player_name }}</span>
+            {% if p.bucket == "ingame" %}
+            <span class="badge badge-ingame"><span class="dot ingame"></span>游戏中</span>
+            {% elif p.bucket == "online" %}
+            <span class="badge badge-blue"><span class="dot {{ p.dot_class }}"></span>{{ p.status_text }}</span>
+            {% else %}
+            <span class="badge badge-slate"><span class="dot offline"></span>{{ p.status_text }}</span>
+            {% endif %}
+            {% if p.group_label %}
+            <span class="badge badge-slate">{{ p.group_label }}</span>
+            {% endif %}
+          </div>
+          {% if p.steam_id %}
+          <div class="mono" style="margin-top: 6px; font-size: 12px; color: var(--text-muted);">SteamID: {{ p.steam_id }}</div>
+          {% endif %}
+          {% if p.bucket == "offline" and p.last_logoff_text %}
+          <div style="margin-top: 6px; font-size: 13px; color: var(--text-secondary);">上次在线：{{ p.last_logoff_text }}</div>
+          {% endif %}
+        </div>
+      </div>
+
+      {% if p.bucket == "ingame" %}
+      <div class="pl-single-game">
+        <div class="cover-box">
+          <div class="cover-fallback">
+            <span class="cover-fallback-tag">IN-GAME</span>
+            <span class="cover-fallback-title">{{ p.game_name }}</span>
+          </div>
+          {% if p.cover_url %}
+          <img class="cover-img" src="{{ p.cover_url }}" alt="{{ p.game_name }}" onerror="this.style.display='none'" />
+          {% endif %}
+        </div>
+        <div style="min-width: 0;">
+          <div style="font-size: 12px; color: var(--steam-green); font-weight: 600;">正在游玩</div>
+          <div style="font-size: 20px; font-weight: 700; color: #fff; margin-top: 2px;">{{ p.game_name }}</div>
+          {% if p.duration_text %}
+          <div style="margin-top: 10px;">
+            <span class="badge badge-ingame num">已游玩 {{ p.duration_text }}</span>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  {% elif all_players %}
+    {% if ingame_players %}
+    <div class="pl-section">
+      <div class="section-title"><span class="dot ingame"></span>正在游玩 ({{ ingame_players | length }})</div>
+      <div class="pl-rows">
+        {% for p in ingame_players %}
+        <div class="pl-row ingame">
+          <div class="avatar-wrap sm">
+            <div class="avatar-box ingame">
+              <span class="avatar-initial">{{ p.initial }}</span>
+              {% if p.avatar_url %}
+              <img class="avatar-img" src="{{ p.avatar_url }}" alt="{{ p.player_name }}" onerror="this.style.display='none'" />
+              {% endif %}
+            </div>
+            {% if p.avatar_frame_url %}
+            <img class="avatar-frame" src="{{ p.avatar_frame_url }}" alt="" onerror="this.style.display='none'" />
+            {% endif %}
+          </div>
+          <div style="min-width: 0;">
+            <div class="pl-name-line">
+              <span class="pl-name truncate">{{ p.player_name }}</span>
+              {% if p.group_label %}
+              <span class="badge badge-slate" style="font-size: 11px; padding: 1px 7px;">{{ p.group_label }}</span>
+              {% endif %}
+            </div>
+            <div class="pl-detail">
+              <span class="pl-game-text truncate">{{ p.game_name }}</span>
+              {% if p.duration_text %}
+              <span class="badge badge-ingame num" style="font-size: 11px; padding: 1px 8px;">{{ p.duration_text }}</span>
+              {% endif %}
+            </div>
+          </div>
+          <div class="pl-right">
+            {% if p.cover_url or p.game_name %}
+            <div class="pl-mini-cover">
+              <div class="cover-box">
+                <div class="cover-fallback">
+                  <span class="cover-fallback-title">{{ p.game_name }}</span>
+                </div>
+                {% if p.cover_url %}
+                <img class="cover-img" src="{{ p.cover_url }}" alt="{{ p.game_name }}" onerror="this.style.display='none'" />
+                {% endif %}
+              </div>
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    {% if online_players %}
+    <div class="pl-section">
+      <div class="section-title"><span class="dot online"></span>在线 / 离开 ({{ online_players | length }})</div>
+      <div class="pl-rows">
+        {% for p in online_players %}
+        <div class="pl-row">
+          <div class="avatar-wrap sm">
+            <div class="avatar-box {{ p.dot_class }}">
+              <span class="avatar-initial">{{ p.initial }}</span>
+              {% if p.avatar_url %}
+              <img class="avatar-img" src="{{ p.avatar_url }}" alt="{{ p.player_name }}" onerror="this.style.display='none'" />
+              {% endif %}
+            </div>
+            {% if p.avatar_frame_url %}
+            <img class="avatar-frame" src="{{ p.avatar_frame_url }}" alt="" onerror="this.style.display='none'" />
+            {% endif %}
+          </div>
+          <div style="min-width: 0;">
+            <div class="pl-name-line">
+              <span class="pl-name truncate">{{ p.player_name }}</span>
+              {% if p.group_label %}
+              <span class="badge badge-slate" style="font-size: 11px; padding: 1px 7px;">{{ p.group_label }}</span>
+              {% endif %}
+            </div>
+            <div class="pl-detail">
+              <span style="color: var(--steam-blue);">{{ p.status_text }}</span>
+            </div>
+          </div>
+          <div class="pl-right">
+            <span class="badge badge-blue"><span class="dot {{ p.dot_class }}"></span>{{ p.status_text }}</span>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    {% if offline_players %}
+    <div class="pl-section">
+      <div class="section-title"><span class="dot offline"></span>离线 ({{ offline_players | length }})</div>
+      <div class="pl-rows">
+        {% for p in offline_players %}
+        <div class="pl-row offline">
+          <div class="avatar-wrap sm">
+            <div class="avatar-box offline">
+              <span class="avatar-initial">{{ p.initial }}</span>
+              {% if p.avatar_url %}
+              <img class="avatar-img" src="{{ p.avatar_url }}" alt="{{ p.player_name }}" onerror="this.style.display='none'" />
+              {% endif %}
+            </div>
+          </div>
+          <div style="min-width: 0;">
+            <div class="pl-name-line">
+              <span class="pl-name truncate">{{ p.player_name }}</span>
+              {% if p.group_label %}
+              <span class="badge badge-slate" style="font-size: 11px; padding: 1px 7px;">{{ p.group_label }}</span>
+              {% endif %}
+            </div>
+            <div class="pl-detail">
+              <span style="color: var(--text-muted);">{{ p.last_logoff_text or "离线" }}</span>
+            </div>
+          </div>
+          <div class="pl-right">
+            <span class="badge badge-slate">{{ p.status_text }}</span>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  {% else %}
+  <div class="empty-state">当前没有可展示的监控玩家</div>
+  {% endif %}
+</div>
+
+<div class="card-footer">
+  <span>Steam 状态监控 · 共 {{ all_players | length }} 位玩家</span>
+  {% if timestamp %}<span class="mono">更新于 {{ timestamp }}</span>{% endif %}
+</div>
+{% endblock %}

@@ -2,17 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
 
+DEFAULT_LLM_TIMEOUT_SECONDS = 20.0
+
 try:
     from ...series_panels import (
+        find_provider_silently,
         is_provider_budget_busy_error,
         resolve_series_provider,
         series_llm_call,
     )
 except Exception:  # pragma: no cover - standalone fallback
+    def find_provider_silently(
+        context: Any, provider_id: str, *, allow_fallback: bool = False
+    ) -> Any:
+        _ = allow_fallback
+        getter = getattr(context, "get_provider_by_id", None)
+        return getter(provider_id) if callable(getter) else None
+
     def is_provider_budget_busy_error(_exc: BaseException | None) -> bool:
         return False
 
@@ -78,6 +89,7 @@ class PersonaLLMResponder:
         persona_id: str = "",
         use_session_persona: bool = True,
         also_for_echo: bool = True,
+        timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
     ) -> None:
         self.context = context
         self.enabled = bool(enabled)
@@ -85,6 +97,10 @@ class PersonaLLMResponder:
         self.persona_id = (persona_id or "").strip()
         self.use_session_persona = bool(use_session_persona)
         self.also_for_echo = bool(also_for_echo)
+        try:
+            self.timeout_seconds = max(0.05, float(timeout_seconds))
+        except (TypeError, ValueError):
+            self.timeout_seconds = DEFAULT_LLM_TIMEOUT_SECONDS
         logger.info(
             "人格LLM回复器初始化: enabled=%s provider=%s persona=%s "
             "use_session=%s also_for_echo=%s",
@@ -200,22 +216,34 @@ class PersonaLLMResponder:
                 return None
 
             system_prompt = await self.resolve_system_prompt(umo)
+
+            async def _invoke() -> Any:
+                async with asyncio.timeout(self.timeout_seconds):
+                    return await self.context.llm_generate(
+                        chat_provider_id=provider_id,
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                    )
+
             llm_resp = await series_llm_call(
                 self.context,
                 provider_id,
                 "astrbot_plugin_dynamics_games",
                 "games_what_to_eat",
-                lambda: self.context.llm_generate(
-                    chat_provider_id=provider_id,
-                    prompt=prompt,
-                    system_prompt=system_prompt,
-                ),
+                _invoke,
+                acquire_timeout=min(15.0, self.timeout_seconds),
             )
             text = self._extract_text(llm_resp)
             if not text:
                 logger.warning("吃什么插件：LLM 返回空内容，回退模板回复")
                 return None
             return text
+        except TimeoutError:
+            logger.warning(
+                "吃什么插件：LLM 生成超时 (%.1fs)，回退模板回复",
+                self.timeout_seconds,
+            )
+            return None
         except Exception as exc:
             if is_provider_budget_busy_error(exc):
                 logger.warning("吃什么插件：共享模型队列繁忙，回退模板回复")
@@ -228,9 +256,9 @@ class PersonaLLMResponder:
             self.context, self.provider_id, role="reply"
         )
         if preferred:
-            # 校验配置的 provider 是否存在
+            # 校验配置的 provider 是否存在（冷启动时静默探测，避免触发宿主缺失告警）
             try:
-                prov = self.context.get_provider_by_id(preferred)
+                prov = find_provider_silently(self.context, preferred)
                 if prov is not None:
                     return preferred
                 logger.warning(

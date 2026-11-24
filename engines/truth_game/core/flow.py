@@ -404,7 +404,7 @@ def build_advance_hook(
             except Exception:  # noqa: BLE001
                 room.round_stage = "question_out"
         try:
-            manager._cancel_choice_timer(room.group_id)
+            manager._cancel_choice_timer(getattr(room, "room_key", room.group_id))
         except Exception:  # noqa: BLE001
             logger.exception(
                 "[flow] cancel choice timer failed group=%s",
@@ -582,7 +582,10 @@ async def complete_and_announce(
 
     Callers render the returned :class:`Reply` (At-chain or plain).
     """
-    room = manager.rooms.get(group_id) if manager is not None else None
+    room = None
+    if manager is not None:
+        getter = getattr(manager, "get_room", None)
+        room = getter(group_id) if callable(getter) else manager.rooms.get(group_id)
     if room is None:
         # Room may already be gone (e.g. concurrent end); still surface text.
         if text:
@@ -624,7 +627,8 @@ async def maybe_auto_end(
 ) -> Reply | None:
     """Settle the same room whose question triggered the round limit."""
     if room is None and manager is not None:
-        room = manager.rooms.get(group_id)
+        getter = getattr(manager, "get_room", None)
+        room = getter(group_id) if callable(getter) else manager.rooms.get(group_id)
     if room is None:
         return None
     max_q = _cfg_int(config, "max_questions_per_game", 30)

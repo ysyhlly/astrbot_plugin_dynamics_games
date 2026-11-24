@@ -53,7 +53,7 @@ class TruthGamePlugin(Component):
         super().__init__(context)
         self.config = config or {}
         # 每群一间房的状态机；config 为 AstrBot 传入的插件配置字典
-        self.room_manager = RoomManager(self.config)
+        self.room_manager = RoomManager(self.config, context=context)
         # Public config alias for command-layer complete_and_announce / auto-end.
         self.room_manager.config = self.config
         # T10/v2-T3: 装配真实出题链路（抽人 → 人类选择 / 机器人出题）。

@@ -111,21 +111,42 @@ class GamesWebConsole:
             enabled = self.plugin.module_enabled(key)
             engine = self.plugin.engines.get(key)
             active_rooms = 0
+            runtime_summary: dict[str, Any] | None = None
+            desc = spec["desc"]
             if key == "truth_game" and engine is not None:
                 rm = getattr(engine, "room_manager", None)
                 active_rooms = len(getattr(rm, "rooms", {}) or {})
             elif key == "blackjack21" and engine is not None:
                 active_rooms = len(getattr(engine, "rooms", {}) or {})
-            rows.append(
-                {
-                    **spec,
-                    "enabled": enabled,
-                    "loaded": engine is not None,
-                    "active_rooms": active_rooms,
-                    "has_subpage": False,
-                    "subpage": None,
-                }
-            )
+            elif key == "steam_monitor" and engine is not None:
+                getter = getattr(engine, "get_runtime_summary", None)
+                if callable(getter):
+                    try:
+                        runtime_summary = getter()
+                    except Exception:
+                        runtime_summary = None
+                if isinstance(runtime_summary, dict):
+                    groups = int(runtime_summary.get("monitored_groups") or 0)
+                    players = int(runtime_summary.get("monitored_players") or 0)
+                    playing = int(runtime_summary.get("playing_count") or 0)
+                    last_poll = str(runtime_summary.get("last_poll_label") or "尚未轮询")
+                    active_rooms = groups
+                    desc = (
+                        f"{spec['desc']}（监控 {groups} 群 · {players} 人 · "
+                        f"当前 {playing} 人在玩 · 上次轮询：{last_poll}）"
+                    )
+            row: dict[str, Any] = {
+                **spec,
+                "desc": desc,
+                "enabled": enabled,
+                "loaded": engine is not None,
+                "active_rooms": active_rooms,
+                "has_subpage": False,
+                "subpage": None,
+            }
+            if runtime_summary is not None:
+                row["runtime_summary"] = runtime_summary
+            rows.append(row)
         return rows
 
     async def overview(self) -> dict[str, Any]:

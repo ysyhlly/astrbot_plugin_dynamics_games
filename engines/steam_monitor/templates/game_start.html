@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+
+{% block extra_css %}
+.gs-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+.gs-player-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.gs-player-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.gs-player-name {
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--text-primary);
+  max-width: 340px;
+}
+.gs-time {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.gs-hero {
+  position: relative;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid rgba(144, 186, 60, 0.28);
+  background: var(--bg-panel);
+}
+.gs-hero .cover-box {
+  border-radius: 0;
+  border: none;
+}
+.gs-game-bar {
+  padding: 16px 18px;
+  background: linear-gradient(180deg, rgba(22, 32, 45, 0.92), rgba(18, 26, 37, 0.98));
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.gs-titles {
+  min-width: 0;
+  flex: 1;
+}
+.gs-game-zh {
+  font-size: 21px;
+  font-weight: 700;
+  color: #ffffff;
+  line-height: 1.25;
+}
+.gs-game-en {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+.gs-online-badge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(144, 186, 60, 0.14);
+  border: 1px solid rgba(144, 186, 60, 0.4);
+  color: #c6ef68;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+{% endblock %}
+
+{% block content %}
+<div class="accent-bar ingame"></div>
+
+<div class="card-header">
+  <div class="gs-head">
+    <div class="avatar-wrap">
+      <div class="avatar-box ingame">
+        <span class="avatar-initial">{{ player_initial }}</span>
+        {% if avatar_url %}
+        <img class="avatar-img" src="{{ avatar_url }}" alt="{{ player_name }}" onerror="this.style.display='none'" />
+        {% endif %}
+      </div>
+      {% if avatar_frame_url %}
+      <img class="avatar-frame" src="{{ avatar_frame_url }}" alt="" onerror="this.style.display='none'" />
+      {% endif %}
+    </div>
+    <div class="gs-player-meta">
+      <div class="gs-player-row">
+        <span class="gs-player-name truncate">{{ player_name }}</span>
+        <span class="badge badge-ingame"><span class="dot ingame"></span>正在游玩</span>
+      </div>
+      {% if group_name %}
+      <div style="font-size: 12px; color: var(--text-muted);">{{ group_name }}</div>
+      {% endif %}
+    </div>
+  </div>
+  {% if timestamp %}
+  <div class="gs-time mono">{{ timestamp }}</div>
+  {% endif %}
+</div>
+
+<div class="card-body">
+  <div class="gs-hero">
+    <div class="cover-box">
+      <div class="cover-fallback">
+        <span class="cover-fallback-tag">STEAM GAME</span>
+        <span class="cover-fallback-title">{{ game_name }}</span>
+      </div>
+      {% if cover_url %}
+      <img class="cover-img" src="{{ cover_url }}" alt="{{ game_name }}" onerror="this.style.display='none'" />
+      {% endif %}
+    </div>
+    <div class="gs-game-bar">
+      <div class="gs-titles">
+        <div class="gs-game-zh">{{ game_name }}</div>
+        {% if game_name_en and game_name_en != game_name %}
+        <div class="gs-game-en">{{ game_name_en }}</div>
+        {% endif %}
+      </div>
+      {% if online_count_text %}
+      <div class="gs-online-badge num">
+        <span class="dot ingame"></span>
+        <span>{{ online_count_text }}</span>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="card-footer">
+  <span>Steam 状态监控{% if appid %} · AppID {{ appid }}{% endif %}</span>
+  {% if steam_id %}<span class="mono">{{ steam_id }}</span>{% endif %}
+</div>
+{% endblock %}

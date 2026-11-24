@@ -1,4 +1,9 @@
-# astrbot_plugin_dynamics_games v0.1.1-rc.6
+# astrbot_plugin_dynamics_games v0.1.2-rc.1
+
+## v0.1.2-rc.1 — 2026-11-24
+
+- 新增 `steam_monitor` Steam 状态监控引擎并完成上线加固：游戏查询翻译走 `series_llm_call` + 超时保护，主动播报接入 `_can_proactive_broadcast()` 与共享时区，渲染临时 PNG 发送后及启动时自动清理，复用长连接 `httpx.AsyncClient`、缓存/队列设上限并将 SQLite 移出主事件循环。
+- `rollpig` `draw()` 落盘移入 `asyncio.to_thread` 消除主循环阻塞；`what_to_eat` 补全 LLM/工具超时保护并在 `terminate()` 刷盘 `taste_memory`；同步最新 `series_panels.py`。
 
 ## v0.1.1-rc.6 — 2026-11-22
 
