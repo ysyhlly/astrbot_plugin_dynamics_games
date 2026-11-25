@@ -193,6 +193,24 @@ class AchievementService:
         )
         self._delayed[key] = delayed
 
+    def stop_tracking_except(self, allowed_sids: set[str]) -> list[str]:
+        """Immediately stop periodic and delayed checks for any steam_id not in ``allowed_sids``."""
+        allowed = {str(s or "").strip() for s in allowed_sids if str(s or "").strip()}
+        stopped: list[str] = []
+        for sid in list(self._active.keys()):
+            if sid not in allowed:
+                self.stop_tracking(sid, delayed_final_check=False)
+                stopped.append(sid)
+        for key in list(self._delayed.keys()):
+            sid, _appid = key
+            if sid not in allowed:
+                delayed = self._delayed.pop(key, None)
+                if delayed is not None and delayed.task and not delayed.task.done():
+                    delayed.task.cancel()
+                if sid not in stopped:
+                    stopped.append(sid)
+        return stopped
+
     def close(self) -> None:
         """Cancel all active periodic tasks and pending delayed checks cleanly."""
         self._closed = True

@@ -11,7 +11,6 @@ Covers:
 
 from __future__ import annotations
 
-import json
 import pathlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock

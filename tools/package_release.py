@@ -13,7 +13,7 @@ from pathlib import Path
 
 SKIP_DIRS = {".git", ".omo", ".agents", ".codex", "node_modules", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".venv", "venv", "data", "backups", "dist", "output", "htmlcov"}
 SOURCE_ONLY = {"tests", "integration", "integration_tests", ".github", "docs", "tools", "scripts", "frontend"}
-SKIP_FILES = {"validation.json", "cmd_config.json", "requirements-dev.txt", "nul"}
+SKIP_FILES = {"validation.json", "cmd_config.json", "requirements-dev.txt", "build_release.py", "nul"}
 STATE_SUFFIXES = {".db", ".sqlite", ".sqlite3", ".pyc", ".pyo", ".log", ".zip", ".tar", ".tgz", ".pem", ".key"}
 
 def release_metadata(root):

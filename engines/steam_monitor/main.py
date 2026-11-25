@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import re
 import ssl
@@ -167,7 +168,7 @@ def _mask_secret(value: Any) -> str:
     return f"{text[:3]}******{text[-3:]}"
 
 
-def _build_image_component(image_ref: str) -> Any:
+def _build_image_component(image_ref: str, *, prefer_bytes: bool = False) -> Any:
     if Image is None:
         return None
     ref = str(image_ref or "").strip()
@@ -177,6 +178,18 @@ def _build_image_component(image_ref: str) -> Any:
         return Image.fromURL(ref)
     if ref.startswith("base64://"):
         return Image.fromBase64(ref[len("base64://") :])
+    if prefer_bytes and SteamCardRenderer.is_temp_card_path(ref) and os.path.isfile(ref):
+        try:
+            raw = Path(ref).read_bytes()
+        except OSError:
+            raw = b""
+        if raw:
+            from_bytes = getattr(Image, "fromBytes", None)
+            if callable(from_bytes):
+                return from_bytes(raw)
+            from_b64 = getattr(Image, "fromBase64", None)
+            if callable(from_b64):
+                return from_b64(base64.b64encode(raw).decode("ascii"))
     return Image.fromFileSystem(ref)
 
 
@@ -256,6 +269,9 @@ class SteamMonitorEngine(Component):
         self._group_last_sent: dict[str, float] = {}
         self._min_group_send_interval: float = 1.2
         self._temp_card_refs: dict[str, int] = {}
+        self._pending_temp_cards: set[str] = set()
+        self._deferred_cleanup_tasks: set[asyncio.Task[Any]] = set()
+        self._temp_card_ttl_seconds: float = 120.0
 
         self._baseline_synced: bool = False
         self._last_poll_ts: float = 0.0
@@ -353,7 +369,51 @@ class SteamMonitorEngine(Component):
         key = str(image_ref)
         if self._temp_card_refs.get(key, 0) > 0:
             return
+        self._pending_temp_cards.discard(key)
         await asyncio.to_thread(SteamCardRenderer.cleanup_temp_file, key)
+
+    async def _deferred_cleanup_temp_card(self, key: str, delay_seconds: float) -> None:
+        try:
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+            if self._temp_card_refs.get(key, 0) > 0:
+                return
+            await asyncio.to_thread(SteamCardRenderer.cleanup_temp_file, key)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.logger.debug("[SteamMonitor] 延迟清理临时卡片失败: %s", key)
+        finally:
+            self._pending_temp_cards.discard(key)
+
+    def _schedule_temp_card_cleanup(
+        self, image_ref: str | None, *, delay_seconds: float | None = None
+    ) -> None:
+        """Schedule deferred TTL cleanup for yielded command cards so AstrBot RespondStage
+        can finish reading/uploading the temp PNG before it is removed from disk."""
+        if not image_ref or not SteamCardRenderer.is_temp_card_path(image_ref):
+            return
+        key = str(image_ref)
+        if self._temp_card_refs.get(key, 0) > 0:
+            return
+        self._pending_temp_cards.add(key)
+        delay = (
+            self._temp_card_ttl_seconds
+            if delay_seconds is None
+            else max(0.0, float(delay_seconds))
+        )
+        if self._closed:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(
+            self._deferred_cleanup_temp_card(key, delay),
+            name=f"steam_card_ttl_cleanup_{Path(key).name}",
+        )
+        self._deferred_cleanup_tasks.add(task)
+        task.add_done_callback(self._deferred_cleanup_tasks.discard)
 
     def _resolve_html_render_fn(self) -> Callable[..., Any] | None:
         if self._html_render_override is not None:
@@ -364,16 +424,61 @@ class SteamMonitorEngine(Component):
         return fn if callable(fn) else None
 
     @staticmethod
-    def _group_id(event: Any) -> str:
+    def _adapter_prefix(event: Any) -> str:
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if ":" in umo:
+            return umo.split(":", 1)[0].strip()
+        return ""
+
+    @classmethod
+    def _group_id(cls, event: Any) -> str:
+        raw_gid = ""
         getter = getattr(event, "get_group_id", None)
         if callable(getter):
             gid = str(getter() or "").strip()
             if gid and gid.lower() != "none":
-                return gid
+                raw_gid = gid
         umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
-        if ":GroupMessage:" in umo:
-            return umo.rsplit(":", 1)[-1].strip()
-        return ""
+        if not raw_gid and ":GroupMessage:" in umo:
+            raw_gid = umo.rsplit(":", 1)[-1].strip()
+        if not raw_gid:
+            return ""
+        if ":" in raw_gid:
+            return raw_gid
+        adapter = cls._adapter_prefix(event)
+        return f"{adapter}:{raw_gid}" if adapter else raw_gid
+
+    async def _resolve_target_group_id(
+        self, event: Any, explicit_gid: str = ""
+    ) -> str:
+        """Resolve an optional explicit group parameter against the current adapter scope."""
+        current_gid = self._group_id(event)
+        raw = str(explicit_gid or "").strip()
+        if not raw:
+            return current_gid
+        if ":" in raw:
+            return raw
+        adapter = self._adapter_prefix(event)
+        if current_gid and (
+            current_gid == raw or (adapter and current_gid == f"{adapter}:{raw}")
+        ):
+            return current_gid
+        if self.store is not None:
+            return await asyncio.to_thread(
+                self.store.resolve_group_id, raw, preferred_adapter=adapter
+            )
+        return raw
+
+    async def _sync_achievement_tracking_after_scope_change(self) -> None:
+        """Stop achievement polling/delayed checks for players no longer monitored by any enabled group."""
+        if self.store is None or self.achievement_service is None:
+            return
+        enabled_sids = set(
+            await asyncio.to_thread(
+                self.store.list_all_monitored_steam_ids, only_enabled_groups=True
+            )
+        )
+        self.achievement_service.stop_tracking_except(enabled_sids)
 
     @staticmethod
     def _sender_id(event: Any) -> str:
@@ -484,12 +589,20 @@ class SteamMonitorEngine(Component):
     ) -> Any:
         if prefer_image and image_ref:
             if caption and hasattr(event, "chain_result") and Image is not None and Plain is not None:
-                img_comp = _build_image_component(image_ref)
+                img_comp = _build_image_component(image_ref, prefer_bytes=True)
                 if img_comp is not None:
                     return event.chain_result([img_comp, Plain(caption)])
             if image_ref.startswith(("http://", "https://")):
                 if hasattr(event, "chain_result") and Image is not None:
                     return event.chain_result([Image.fromURL(image_ref)])
+            if (
+                SteamCardRenderer.is_temp_card_path(image_ref)
+                and hasattr(event, "chain_result")
+                and Image is not None
+            ):
+                img_comp = _build_image_component(image_ref, prefer_bytes=True)
+                if img_comp is not None:
+                    return event.chain_result([img_comp])
             if hasattr(event, "image_result"):
                 return event.image_result(image_ref)
         return event.plain_result(fallback_text)
@@ -586,6 +699,11 @@ class SteamMonitorEngine(Component):
             if task is not None and not task.done():
                 task.cancel()
                 tasks.append(task)
+        for task in list(self._deferred_cleanup_tasks):
+            if not task.done():
+                task.cancel()
+                tasks.append(task)
+        self._deferred_cleanup_tasks.clear()
         self._poll_task = None
         self._daily_push_task = None
         self._send_worker_task = None
@@ -605,11 +723,11 @@ class SteamMonitorEngine(Component):
             except Exception:
                 self.logger.exception("[SteamMonitor] 关闭 Steam HTTP 客户端池异常")
 
-        if self._temp_card_refs:
-            leftover = list(self._temp_card_refs.keys())
-            self._temp_card_refs.clear()
-            for path in leftover:
-                await asyncio.to_thread(SteamCardRenderer.cleanup_temp_file, path)
+        leftover_cards = set(self._temp_card_refs.keys()) | set(self._pending_temp_cards)
+        self._temp_card_refs.clear()
+        self._pending_temp_cards.clear()
+        for path in leftover_cards:
+            await asyncio.to_thread(SteamCardRenderer.cleanup_temp_file, path)
 
         self._group_last_sent.clear()
         self.logger.info("[SteamMonitor] Steam 状态监控引擎已停止")
@@ -1686,7 +1804,16 @@ class SteamMonitorEngine(Component):
         closed_sessions = await asyncio.to_thread(
             self.store.query_play_sessions_overlapping, start_ts, end_ts, target_sids
         )
-        active_sessions = list((await asyncio.to_thread(self.store.load_active_sessions)).values())
+        enabled_monitored_sids = set(
+            await asyncio.to_thread(
+                self.store.list_all_monitored_steam_ids, only_enabled_groups=True
+            )
+        )
+        active_sessions = [
+            sess
+            for sess in (await asyncio.to_thread(self.store.load_active_sessions)).values()
+            if sess.steam_id in enabled_monitored_sids
+        ]
         legacy_rows = await asyncio.to_thread(
             self.store.query_legacy_daily_playtime, start_day, end_day, target_sids
         )
@@ -1950,7 +2077,7 @@ class SteamMonitorEngine(Component):
         try:
             yield self._make_reply(event, img_ref, fallback_text, caption=caption)
         finally:
-            await self._cleanup_temp_card_if_unused(img_ref)
+            self._schedule_temp_card_cleanup(img_ref)
 
     # ------------------------------------------------------------------
     # Command Handlers — All Users
@@ -1987,7 +2114,7 @@ class SteamMonitorEngine(Component):
         try:
             yield self._make_reply(event, img_ref, fallback_text)
         finally:
-            await self._cleanup_temp_card_if_unused(img_ref)
+            self._schedule_temp_card_cleanup(img_ref)
 
     async def cmd_who(self, event: Any, target: str = "") -> AsyncIterator[Any]:
         if self.store is None or self.steam_client is None or self.renderer is None:
@@ -2046,7 +2173,7 @@ class SteamMonitorEngine(Component):
         try:
             yield self._make_reply(event, img_ref, fallback_text)
         finally:
-            await self._cleanup_temp_card_if_unused(img_ref)
+            self._schedule_temp_card_cleanup(img_ref)
 
     async def cmd_rank(self, event: Any, period: str = "") -> AsyncIterator[Any]:
         if self.store is None or self.renderer is None:
@@ -2079,7 +2206,7 @@ class SteamMonitorEngine(Component):
         try:
             yield self._make_reply(event, img_ref, fallback_text)
         finally:
-            await self._cleanup_temp_card_if_unused(img_ref)
+            self._schedule_temp_card_cleanup(img_ref)
 
     async def cmd_price(
         self, event: Any, query: str = "", *, quick: bool = False
@@ -2128,7 +2255,7 @@ class SteamMonitorEngine(Component):
         try:
             yield self._make_reply(event, img_ref, fallback_text, caption=caption)
         finally:
-            await self._cleanup_temp_card_if_unused(img_ref)
+            self._schedule_temp_card_cleanup(img_ref)
 
     async def cmd_px(self, event: Any, query: str = "") -> AsyncIterator[Any]:
         async for r in self.cmd_price(event, query, quick=True):
@@ -2152,7 +2279,7 @@ class SteamMonitorEngine(Component):
         try:
             yield self._make_reply(event, img_ref, fallback_text, caption=caption)
         finally:
-            await self._cleanup_temp_card_if_unused(img_ref)
+            self._schedule_temp_card_cleanup(img_ref)
 
     async def cmd_openbox(self, event: Any, target: str = "") -> AsyncIterator[Any]:
         if self.store is None or self.steam_client is None or self.renderer is None:
@@ -2198,7 +2325,7 @@ class SteamMonitorEngine(Component):
         try:
             yield self._make_reply(event, img_ref, fallback_text)
         finally:
-            await self._cleanup_temp_card_if_unused(img_ref)
+            self._schedule_temp_card_cleanup(img_ref)
 
     async def cmd_bind(
         self, event: Any, steamid_raw: str = "", nickname: str = ""
@@ -2393,12 +2520,12 @@ class SteamMonitorEngine(Component):
         sender_id = self._sender_id(event)
         current_gid = self._group_id(event)
         explicit_gid = str(group_id_param or "").strip()
+        target_gid = await self._resolve_target_group_id(event, explicit_gid)
 
-        if explicit_gid and explicit_gid != current_gid and not is_admin:
+        if explicit_gid and target_gid != current_gid and not is_admin:
             yield event.plain_result("❌ 权限不足：跨群删除监控仅限 Bot 管理员。")
             return
 
-        target_gid = explicit_gid or current_gid
         if not target_gid:
             yield event.plain_result("请在群聊中使用 /steam delid，或管理员指定群号。")
             return
@@ -2443,12 +2570,7 @@ class SteamMonitorEngine(Component):
             yield event.plain_result(f"群 {target_gid} 的监控列表或副群路由中不存在 SteamID {sid}。")
             return
 
-        remaining_groups = await asyncio.to_thread(self.store.get_groups_for_steam_id, sid)
-        remaining_routes = await asyncio.to_thread(self.store.list_push_routes, steam_id=sid)
-        if not remaining_groups and not remaining_routes:
-            await asyncio.to_thread(self.store.delete_active_session, sid)
-            if self.achievement_service is not None:
-                self.achievement_service.stop_tracking(sid, delayed_final_check=False)
+        await self._sync_achievement_tracking_after_scope_change()
 
         if removed_route:
             yield event.plain_result(f"✅ 已移除群 {target_gid} 对 SteamID {sid} 的副群推送路由。")
@@ -2493,6 +2615,7 @@ class SteamMonitorEngine(Component):
             yield event.plain_result("请在群聊中使用 /steam off。")
             return
         await asyncio.to_thread(self.store.set_group_switch, gid, "monitor_enabled", False)
+        await self._sync_achievement_tracking_after_scope_change()
         yield event.plain_result(f"✅ 已关闭本群（{gid}）Steam 状态监控推送。")
 
     async def cmd_achievement_on(self, event: Any) -> AsyncIterator[Any]:
@@ -2568,7 +2691,8 @@ class SteamMonitorEngine(Component):
             return
 
         if action in ("del", "off", "remove"):
-            target_gid = parts[1].strip() if len(parts) > 1 else gid
+            explicit_gid = parts[1].strip() if len(parts) > 1 else ""
+            target_gid = await self._resolve_target_group_id(event, explicit_gid)
             if not target_gid:
                 yield event.plain_result("用法：/steam rank_on del [群号]")
                 return
@@ -2623,7 +2747,7 @@ class SteamMonitorEngine(Component):
         if self.store is None or self.steam_client is None:
             yield event.plain_result("Steam 状态监控引擎尚未就绪。")
             return
-        gid = str(target_group or "").strip() or self._group_id(event)
+        gid = await self._resolve_target_group_id(event, target_group)
         if not gid:
             yield event.plain_result("用法：/steam delpush_group <SteamID> [群号]")
             return
@@ -2633,6 +2757,7 @@ class SteamMonitorEngine(Component):
             return
         removed = await asyncio.to_thread(self.store.remove_push_route, sid, gid)
         if removed:
+            await self._sync_achievement_tracking_after_scope_change()
             yield event.plain_result(f"✅ 已移除群 {gid} 对 SteamID {sid} 的副群联动推送路由。")
         else:
             yield event.plain_result(f"群 {gid} 未配置对 SteamID {sid} 的副群推送路由。")
@@ -2646,11 +2771,13 @@ class SteamMonitorEngine(Component):
         if self.store is None:
             yield event.plain_result("Steam 状态监控引擎尚未就绪。")
             return
-        gid = str(group_id_param or "").strip() or self._group_id(event)
+        gid = await self._resolve_target_group_id(event, group_id_param)
         if not gid:
             yield event.plain_result("用法：/steam clear_groupids [群号]")
             return
         removed = await asyncio.to_thread(self.store.clear_group_players, gid)
+        if removed > 0:
+            await self._sync_achievement_tracking_after_scope_change()
         yield event.plain_result(f"✅ 已清空群 {gid} 的监控列表（共移除 {removed} 条记录）。")
 
     async def cmd_clear_allids(self, event: Any) -> AsyncIterator[Any]:
@@ -2717,7 +2844,7 @@ class SteamMonitorEngine(Component):
         try:
             yield self._make_reply(event, img_ref, fallback_text)
         finally:
-            await self._cleanup_temp_card_if_unused(img_ref)
+            self._schedule_temp_card_cleanup(img_ref)
 
     async def cmd_allrank(self, event: Any, period: str = "") -> AsyncIterator[Any]:
         if not self._is_admin(event):
@@ -2748,7 +2875,7 @@ class SteamMonitorEngine(Component):
         try:
             yield self._make_reply(event, img_ref, fallback_text)
         finally:
-            await self._cleanup_temp_card_if_unused(img_ref)
+            self._schedule_temp_card_cleanup(img_ref)
 
     async def cmd_config(self, event: Any) -> AsyncIterator[Any]:
         if not self._is_admin(event):

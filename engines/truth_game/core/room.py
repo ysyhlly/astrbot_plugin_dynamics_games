@@ -963,13 +963,16 @@ class RoomManager:
             await self._send_text(
                 self_room.bot,
                 f"⏰ 提问者超时未选择，由机器人出题：{body}",
+                umo=self_room.umo or group_id,
             )
         if summary is not None:
             if cancelled:
                 await asyncio.gather(*cancelled, return_exceptions=True)
             await self.flush_outcomes()
             self._note_pending_outcome(self_room, summary)
-            await self._send_text(self_room.bot, summary["summary_text"])
+            await self._send_text(
+                self_room.bot, summary["summary_text"], umo=self_room.umo or group_id
+            )
 
     async def _idle_timer_loop(self, group_id: str, self_room: Room) -> None:
         """Round-idle auto-advance loop (ONE task per room).
@@ -1029,14 +1032,18 @@ class RoomManager:
             # announce outside the lock (recheck already passed immediately
             # before this send — no awaits in between)
             await self._send_text(
-                self_room.bot, f"⏰ 长时间无人操作，自动进入下一题：{text}"
+                self_room.bot,
+                f"⏰ 长时间无人操作，自动进入下一题：{text}",
+                umo=self_room.umo or group_id,
             )
             if summary is not None:
                 if cancelled:
                     await asyncio.gather(*cancelled, return_exceptions=True)
                 await self.flush_outcomes()
                 self._note_pending_outcome(self_room, summary)
-                await self._send_text(self_room.bot, summary["summary_text"])
+                await self._send_text(
+                    self_room.bot, summary["summary_text"], umo=self_room.umo or group_id
+                )
                 return
 
     async def _waiting_timer_loop(self, group_id: str, self_room: Room) -> None:
@@ -1074,6 +1081,7 @@ class RoomManager:
                     await self._send_text(
                         self_room.bot,
                         "⏰ 真心话房间创建后长时间无人报名，已自动关闭，请重新发送 真心话 开房。",
+                        umo=self_room.umo or group_id,
                     )
                     # re-validate after the send await — abort if anything moved
                     if self.rooms.get(group_id) is not self_room:
@@ -1106,13 +1114,32 @@ class RoomManager:
         except Exception:
             return False
 
-    async def _send_text(self, bot: Any, text: str) -> None:
-        """Duck-typed send: ``bot`` must expose ``send(text)`` returning an
-        awaitable (or be ``None``). Suppressed during series quiet hours;
-        failures are logged and swallowed."""
+    async def _send_text(self, bot: Any, text: str, *, umo: str = "") -> None:
+        """Send proactive room notice via ``context.send_message(umo, MessageChain)``
+        when available, falling back to duck-typed ``bot.send(text)`` for unit tests.
+        Suppressed during series quiet hours; failures are logged and swallowed."""
         if self._is_in_quiet_hours():
             logger.debug("静默时段内抑制真心话房间主动播报: %r", text[:40])
             return
+        ctx = getattr(self, "context", None)
+        clean_umo = str(umo or "").strip()
+        send_message = getattr(ctx, "send_message", None) if ctx is not None else None
+        if clean_umo and callable(send_message):
+            payload: Any = text
+            try:
+                from astrbot.api.event import MessageChain
+
+                payload = MessageChain().message(text)
+            except Exception:
+                payload = text
+            try:
+                maybe = send_message(clean_umo, payload)
+                if inspect.isawaitable(maybe):
+                    await maybe
+                return
+            except Exception:
+                logger.warning("通过 context.send_message 发送房间通知失败（忽略）: %r", text[:40])
+                return
         if bot is None:
             return
         send = getattr(bot, "send", None)

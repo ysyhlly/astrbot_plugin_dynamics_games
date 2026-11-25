@@ -124,7 +124,10 @@ class WhatToEatPlugin(Component):
                 config.get("api_probability", 0.35),
             )
         )
-        mcp_server_name = str(config.get("mcp_server_name", "cook") or "cook").strip()
+        raw_mcp_server_name = config.get("mcp_server_name", "cook")
+        mcp_server_name = (
+            "cook" if raw_mcp_server_name is None else str(raw_mcp_server_name).strip()
+        )
         mcp_people_count = int(config.get("mcp_people_count", 1) or 1)
         mcp_mode = str(config.get("mcp_mode", "random") or "random")
         mcp_categories_raw = config.get("mcp_categories", None)

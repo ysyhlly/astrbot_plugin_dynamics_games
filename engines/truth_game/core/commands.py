@@ -34,7 +34,41 @@ RoomManager contract used (T3): ``create/join/start -> (ok, reason)``;
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import inspect
 from typing import Any
+
+
+class _ContextBotAdapter:
+    """Adapter routing single-arg proactive text sends to AstrBot ``context.send_message``."""
+
+    def __init__(self, context: Any, umo: str) -> None:
+        self._context = context
+        self._umo = str(umo or "").strip()
+
+    async def send(self, text: str) -> None:
+        if not self._umo:
+            return
+        send_fn = getattr(self._context, "send_message", None)
+        if not callable(send_fn):
+            return
+        payload: Any = text
+        try:
+            from astrbot.api.event import MessageChain
+
+            payload = MessageChain().message(text)
+        except Exception:
+            payload = text
+        maybe = send_fn(self._umo, payload)
+        if inspect.isawaitable(maybe):
+            await maybe
+
+
+def _resolve_proactive_bot(manager: Any, event: Any, umo: str) -> Any:
+    ctx = getattr(manager, "context", None)
+    clean_umo = str(umo or "").strip()
+    if ctx is not None and clean_umo and callable(getattr(ctx, "send_message", None)):
+        return _ContextBotAdapter(ctx, clean_umo)
+    return getattr(event, "bot", None)
 
 Part = tuple[str, str]  # ("text", str) | ("at", qq: str)
 
@@ -227,12 +261,13 @@ async def cmd_create(manager: Any, event: Any) -> Reply:
     gid = group_id_of(event) or rkey
     umo = room_origin_of(event)
     nickname = nickname_of(event, uid)
+    proactive_bot = _resolve_proactive_bot(manager, event, umo)
     try:
         ok, reason = manager.create(
-            gid, uid, nickname, bot=getattr(event, "bot", None), umo=umo
+            gid, uid, nickname, bot=proactive_bot, umo=umo
         )
     except TypeError:
-        ok, reason = manager.create(rkey, uid, nickname, bot=getattr(event, "bot", None))
+        ok, reason = manager.create(rkey, uid, nickname, bot=proactive_bot)
     if not ok:
         return Reply.plain(reason)
     room = _get_room_for_key(manager, rkey, umo=umo)

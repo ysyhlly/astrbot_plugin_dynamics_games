@@ -81,6 +81,7 @@ TRIGGER_WORDS = (
     "㊗️",
 )
 COMMAND_ALIASES = {word for word in TRIGGER_WORDS if word != COMMAND_NAME}
+_TRIGGER_WORDS_LOWER = frozenset(word.lower() for word in TRIGGER_WORDS)
 # 免唤醒匹配规则：消息以触发词开头或结尾即可命中（不区分大小写）
 WAKE_FREE_PATTERN = "(?i)(?:^(?:{0})|(?:{0})$)".format(
     "|".join(map(re.escape, TRIGGER_WORDS))
@@ -133,9 +134,10 @@ class RollPigPlugin(Component):
         if not self.settings.wake_free_trigger:
             return
         text = event.get_message_str().strip()
+        normalized = text.lstrip("/").strip().lower()
         if (
             (event.is_at_or_wake_command or event.is_private_chat())
-            and text in TRIGGER_WORDS
+            and normalized in _TRIGGER_WORDS_LOWER
         ):
             # 该消息已由原有指令路径命中，交回 roll_pig，避免重复回复
             return

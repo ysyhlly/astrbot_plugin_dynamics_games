@@ -18,6 +18,7 @@ ensure_current(
 
 import asyncio
 import json
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 from importlib import reload
@@ -1084,15 +1085,64 @@ class DynamicsGamesPlugin(Star):
     def _extract_tail(
         event: AstrMessageEvent, subcommands: tuple[str, ...], fallback: str = ""
     ) -> str:
-        """Preserve multi-word arguments even when AstrBot splits whitespace after subcommand."""
+        """Preserve multi-word arguments while anchoring strictly to the command prefix."""
         full = str(getattr(event, "message_str", "") or "").strip()
         if not full:
             return fallback
-        for sub in subcommands:
-            idx = full.find(sub)
-            if idx != -1:
-                tail = full[idx + len(sub) :].strip()
-                return tail or fallback
+
+        def _strip_prefix_noise(text: str) -> str:
+            head = text.lstrip()
+            # Strip optional leading @mention or CQ:at segments before command prefix
+            while True:
+                m_cq = re.match(r"^\[CQ:at,[^\]]*\]\s*", head)
+                if m_cq:
+                    head = head[m_cq.end() :].lstrip()
+                    continue
+                m_at = re.match(r"^@\S+\s+", head)
+                if m_at:
+                    head = head[m_at.end() :].lstrip()
+                    continue
+                break
+            if head and head[0] in "/!！.。":
+                head = head[1:].lstrip()
+            return head
+
+        ordered = sorted(
+            (str(s) for s in subcommands if str(s)),
+            key=len,
+            reverse=True,
+        )
+
+        def _match_start(text: str) -> str | None:
+            lowered = text.lower()
+            for sub in ordered:
+                sub_lower = sub.lower()
+                if not lowered.startswith(sub_lower):
+                    continue
+                rest = text[len(sub) :]
+                # Require boundary for ASCII/alphanumeric commands so e.g. 'set' doesn't match 'settings'
+                if sub.isascii() and rest and not rest[0].isspace():
+                    continue
+                return rest.strip()
+            return None
+
+        cleaned = _strip_prefix_noise(full)
+        # 1) Direct top-level command prefix match (e.g. /开黑 一起约局)
+        matched = _match_start(cleaned)
+        if matched is not None:
+            return matched or fallback
+        # 2) Registered command-group subcommand match (e.g. /活动 new ..., /steam set ...)
+        group_split = re.match(r"^(\S+)\s+(.*)$", cleaned, re.S)
+        if group_split and group_split.group(1).lower() in {
+            "活动",
+            "群间游戏",
+            "共创",
+            "games",
+            "steam",
+        }:
+            matched = _match_start(group_split.group(2).lstrip())
+            if matched is not None:
+                return matched or fallback
         return fallback
 
     def _disabled_reply(self, event: AstrMessageEvent, key: str):

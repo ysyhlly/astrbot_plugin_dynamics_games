@@ -928,7 +928,7 @@
         "description": "SteamGridDB 反向代理地址（可选）",
         "type": "string",
         "default": "",
-        "hint": "留空使用官方 https://www.steamgriddb.com。"
+        "hint": "留空使用官方 https://www.steamgriddb.com/api/v2。"
       },
       "itad_api_base": {
         "description": "ITAD 反向代理地址（可选）",

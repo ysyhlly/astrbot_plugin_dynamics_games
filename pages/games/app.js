@@ -243,7 +243,7 @@ function renderHome() {
   };
   addBridgeRow(
     '群间记忆桥接',
-    mem.ready ? '完结活动经历将自动写入混合记忆检索索引' : (mem.reason || '未就绪，本地台账仍完整保留，后续可一键补同步'),
+    mem.ready ? '完结活动经历将自动写入混合记忆检索索引' : (mem.detail || mem.reason || '未就绪，本地台账仍完整保留，后续可一键补同步'),
     Boolean(mem.ready),
     mem.ready ? '已就绪' : '待连接'
   );

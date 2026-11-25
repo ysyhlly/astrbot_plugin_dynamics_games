@@ -1056,10 +1056,20 @@ class ActivityStore:
             return None
         data = dict(row)
         data["valuable"] = bool(data.get("valuable"))
-        data["participants"] = json.loads(
-            data.pop("participants_json", "[]") or "[]"
+        participants = json.loads(data.pop("participants_json", "[]") or "[]")
+        stats = json.loads(data.pop("stats_json", "{}") or "{}")
+        data["participants"] = participants
+        data["stats"] = stats
+        data["participant_count"] = int(
+            stats.get("participant_count")
+            if isinstance(stats, dict) and stats.get("participant_count") is not None
+            else (len(participants) if isinstance(participants, list) else 0)
         )
-        data["stats"] = json.loads(data.pop("stats_json", "{}") or "{}")
+        data["contribution_count"] = int(
+            stats.get("contribution_count") or 0
+            if isinstance(stats, dict)
+            else 0
+        )
         cat = CATEGORIES.get(data["category"], CATEGORIES["creation"])
         data["category_label"] = cat["label"]
         data["category_icon"] = cat["icon"]
@@ -1431,18 +1441,7 @@ class ActivityStore:
             row = db.execute(
                 "SELECT * FROM outcomes WHERE UPPER(activity_id)=?", (clean_id,)
             ).fetchone()
-            if row is None:
-                return None
-            data = dict(row)
-            data["valuable"] = bool(data.get("valuable"))
-            data["participants"] = json.loads(
-                data.pop("participants_json", "[]") or "[]"
-            )
-            data["stats"] = json.loads(data.pop("stats_json", "{}") or "{}")
-            cat = CATEGORIES.get(data["category"], CATEGORIES["creation"])
-            data["category_label"] = cat["label"]
-            data["category_icon"] = cat["icon"]
-            return data
+            return self._hydrate_outcome_row(row)
 
     def list_outcomes(
         self, *, umo: str = "", limit: int = 50, offset: int = 0
@@ -1461,13 +1460,9 @@ class ActivityStore:
                 ).fetchall()
             out: list[dict[str, Any]] = []
             for r in rows:
-                d = dict(r)
-                d["valuable"] = bool(d.get("valuable"))
-                d["participants"] = json.loads(d.pop("participants_json", "[]") or "[]")
-                d["stats"] = json.loads(d.pop("stats_json", "{}") or "{}")
-                cat = CATEGORIES.get(d["category"], CATEGORIES["creation"])
-                d["category_label"] = cat["label"]
-                d["category_icon"] = cat["icon"]
+                d = self._hydrate_outcome_row(r)
+                if d is None:
+                    continue
                 # Omit full markdown in list view to keep payloads snappy
                 d["artifact_preview"] = str(d.get("artifact_markdown") or "")[:360]
                 d.pop("artifact_markdown", None)

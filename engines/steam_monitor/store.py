@@ -225,13 +225,154 @@ class SteamMonitorStore:
             "updated_at": float(row["updated_at"] or 0.0),
         }
 
+    @staticmethod
+    def _group_exists_db(db: sqlite3.Connection, gid: str) -> bool:
+        if not gid:
+            return False
+        row = db.execute(
+            """
+            SELECT 1 FROM group_settings WHERE group_id=?
+            UNION ALL
+            SELECT 1 FROM group_players WHERE group_id=?
+            UNION ALL
+            SELECT 1 FROM push_routes WHERE target_group_id=?
+            LIMIT 1
+            """,
+            (gid, gid, gid),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _list_scoped_matches_for_bare_db(db: sqlite3.Connection, bare: str) -> list[str]:
+        suffix = f":{bare}"
+        like_pat = f"%:{bare}"
+        rows = db.execute(
+            """
+            SELECT DISTINCT gid FROM (
+                SELECT group_id AS gid FROM group_settings WHERE group_id LIKE ?
+                UNION
+                SELECT group_id AS gid FROM group_players WHERE group_id LIKE ?
+                UNION
+                SELECT target_group_id AS gid FROM push_routes WHERE target_group_id LIKE ?
+            )
+            ORDER BY gid ASC
+            """,
+            (like_pat, like_pat, like_pat),
+        ).fetchall()
+        return [str(r["gid"]) for r in rows if str(r["gid"]).endswith(suffix)]
+
+    @classmethod
+    def _resolve_read_group_id_db(
+        cls,
+        db: sqlite3.Connection,
+        group_id: str,
+        *,
+        preferred_adapter: str = "",
+    ) -> str:
+        gid = str(group_id or "").strip()
+        if not gid:
+            return ""
+        if cls._group_exists_db(db, gid):
+            return gid
+        if ":" in gid:
+            adapter, bare = gid.split(":", 1)
+            if bare and cls._group_exists_db(db, bare):
+                gs = db.execute(
+                    "SELECT notify_session FROM group_settings WHERE group_id=?",
+                    (bare,),
+                ).fetchone()
+                ns = str(gs["notify_session"] or "").strip() if gs is not None else ""
+                if not ns or ns.startswith(f"{adapter}:"):
+                    return bare
+            return gid
+        if preferred_adapter:
+            scoped = f"{preferred_adapter}:{gid}"
+            if cls._group_exists_db(db, scoped):
+                return scoped
+        matches = cls._list_scoped_matches_for_bare_db(db, gid)
+        if len(matches) == 1:
+            return matches[0]
+        return gid
+
+    @classmethod
+    def _maybe_migrate_legacy_bare_group_db(
+        cls, db: sqlite3.Connection, scoped_gid: str
+    ) -> None:
+        if ":" not in scoped_gid or cls._group_exists_db(db, scoped_gid):
+            return
+        adapter, bare = scoped_gid.split(":", 1)
+        if not bare or not cls._group_exists_db(db, bare):
+            return
+        gs = db.execute(
+            "SELECT notify_session FROM group_settings WHERE group_id=?",
+            (bare,),
+        ).fetchone()
+        ns = str(gs["notify_session"] or "").strip() if gs is not None else ""
+        if ns and not ns.startswith(f"{adapter}:"):
+            return
+        db.execute(
+            "UPDATE OR IGNORE group_players SET group_id=? WHERE group_id=?",
+            (scoped_gid, bare),
+        )
+        db.execute("DELETE FROM group_players WHERE group_id=?", (bare,))
+        db.execute(
+            "UPDATE OR IGNORE push_routes SET target_group_id=? WHERE target_group_id=?",
+            (scoped_gid, bare),
+        )
+        db.execute("DELETE FROM push_routes WHERE target_group_id=?", (bare,))
+        db.execute(
+            "UPDATE OR IGNORE group_settings SET group_id=? WHERE group_id=?",
+            (scoped_gid, bare),
+        )
+        db.execute("DELETE FROM group_settings WHERE group_id=?", (bare,))
+
+    @staticmethod
+    def _prune_orphan_active_sessions_db(db: sqlite3.Connection) -> list[str]:
+        rows = db.execute(
+            """
+            SELECT steam_id FROM active_sessions
+            WHERE steam_id NOT IN (
+                SELECT DISTINCT gp.steam_id
+                FROM group_players gp
+                LEFT JOIN group_settings gs ON gs.group_id = gp.group_id
+                WHERE COALESCE(gs.monitor_enabled, 1) = 1
+                UNION
+                SELECT DISTINCT pr.steam_id
+                FROM push_routes pr
+                LEFT JOIN group_settings gs ON gs.group_id = pr.target_group_id
+                WHERE COALESCE(gs.monitor_enabled, 1) = 1
+            )
+            ORDER BY steam_id ASC
+            """
+        ).fetchall()
+        orphans = [str(r["steam_id"]) for r in rows]
+        if orphans:
+            db.executemany(
+                "DELETE FROM active_sessions WHERE steam_id=?",
+                [(sid,) for sid in orphans],
+            )
+        return orphans
+
+    def resolve_group_id(self, group_id: str, *, preferred_adapter: str = "") -> str:
+        """Resolve a group key (supporting adapter-scoped keys and unambiguous bare legacy IDs)."""
+        with self.connection(write=False) as db:
+            return self._resolve_read_group_id_db(
+                db, group_id, preferred_adapter=preferred_adapter
+            )
+
+    def prune_orphan_active_sessions(self) -> list[str]:
+        """Delete active_sessions rows for SteamIDs no longer monitored by any enabled group."""
+        with self.connection(write=True) as db:
+            return self._prune_orphan_active_sessions_db(db)
+
     def get_group_settings(self, group_id: str) -> dict[str, Any]:
         gid = str(group_id).strip()
         with self.connection(write=False) as db:
+            resolved = self._resolve_read_group_id_db(db, gid)
             row = db.execute(
-                "SELECT * FROM group_settings WHERE group_id=?", (gid,)
+                "SELECT * FROM group_settings WHERE group_id=?", (resolved,)
             ).fetchone()
-            return self._hydrate_group_settings(row, gid)
+            return self._hydrate_group_settings(row, resolved or gid)
 
     def list_group_settings(self) -> list[dict[str, Any]]:
         with self.connection(write=False) as db:
@@ -255,6 +396,7 @@ class SteamMonitorStore:
             raise ValueError("group_id cannot be empty")
         now = time.time()
         with self.connection(write=True) as db:
+            self._maybe_migrate_legacy_bare_group_db(db, gid)
             row = db.execute(
                 "SELECT * FROM group_settings WHERE group_id=?", (gid,)
             ).fetchone()
@@ -308,6 +450,8 @@ class SteamMonitorStore:
                     now,
                 ),
             )
+            if monitor_enabled is False:
+                self._prune_orphan_active_sessions_db(db)
             updated = db.execute(
                 "SELECT * FROM group_settings WHERE group_id=?", (gid,)
             ).fetchone()
@@ -370,6 +514,7 @@ class SteamMonitorStore:
             return False
         now = time.time()
         with self.connection(write=True) as db:
+            self._maybe_migrate_legacy_bare_group_db(db, gid)
             cur = db.execute(
                 """
                 INSERT OR IGNORE INTO group_players(group_id, steam_id, added_at)
@@ -393,22 +538,27 @@ class SteamMonitorStore:
         gid = str(group_id).strip()
         sid = str(steam_id).strip()
         with self.connection(write=True) as db:
+            resolved = self._resolve_read_group_id_db(db, gid)
             cur = db.execute(
                 "DELETE FROM group_players WHERE group_id=? AND steam_id=?",
-                (gid, sid),
+                (resolved, sid),
             )
-            return cur.rowcount > 0
+            removed = cur.rowcount > 0
+            if removed:
+                self._prune_orphan_active_sessions_db(db)
+            return removed
 
     def list_group_players(self, group_id: str) -> list[str]:
         gid = str(group_id).strip()
         with self.connection(write=False) as db:
+            resolved = self._resolve_read_group_id_db(db, gid)
             rows = db.execute(
                 """
                 SELECT steam_id FROM group_players
                 WHERE group_id=?
                 ORDER BY added_at ASC, steam_id ASC
                 """,
-                (gid,),
+                (resolved,),
             ).fetchall()
             return [str(r["steam_id"]) for r in rows]
 
@@ -471,11 +621,15 @@ class SteamMonitorStore:
     def clear_group_players(self, group_id: str) -> int:
         gid = str(group_id).strip()
         with self.connection(write=True) as db:
-            cur1 = db.execute("DELETE FROM group_players WHERE group_id=?", (gid,))
+            resolved = self._resolve_read_group_id_db(db, gid)
+            cur1 = db.execute("DELETE FROM group_players WHERE group_id=?", (resolved,))
             cur2 = db.execute(
-                "DELETE FROM push_routes WHERE target_group_id=?", (gid,)
+                "DELETE FROM push_routes WHERE target_group_id=?", (resolved,)
             )
-            return int(cur1.rowcount or 0) + int(cur2.rowcount or 0)
+            removed = int(cur1.rowcount or 0) + int(cur2.rowcount or 0)
+            if removed > 0:
+                self._prune_orphan_active_sessions_db(db)
+            return removed
 
     def clear_all_players(self) -> dict[str, int]:
         with self.connection(write=True) as db:
@@ -499,6 +653,7 @@ class SteamMonitorStore:
             return False
         now = time.time()
         with self.connection(write=True) as db:
+            self._maybe_migrate_legacy_bare_group_db(db, gid)
             cur = db.execute(
                 """
                 INSERT OR IGNORE INTO push_routes(steam_id, target_group_id, created_at)
@@ -521,11 +676,15 @@ class SteamMonitorStore:
         sid = str(steam_id).strip()
         gid = str(target_group_id).strip()
         with self.connection(write=True) as db:
+            resolved = self._resolve_read_group_id_db(db, gid)
             cur = db.execute(
                 "DELETE FROM push_routes WHERE steam_id=? AND target_group_id=?",
-                (sid, gid),
+                (sid, resolved),
             )
-            return cur.rowcount > 0
+            removed = cur.rowcount > 0
+            if removed:
+                self._prune_orphan_active_sessions_db(db)
+            return removed
 
     def list_push_routes(
         self,
@@ -590,6 +749,7 @@ class SteamMonitorStore:
         """Return direct players plus players routed to this group via push_routes."""
         gid = str(group_id).strip()
         with self.connection(write=False) as db:
+            resolved = self._resolve_read_group_id_db(db, gid)
             rows = db.execute(
                 """
                 SELECT DISTINCT steam_id FROM (
@@ -599,7 +759,7 @@ class SteamMonitorStore:
                 )
                 ORDER BY steam_id ASC
                 """,
-                (gid, gid),
+                (resolved, resolved),
             ).fetchall()
             return [str(r["steam_id"]) for r in rows]
 
@@ -921,27 +1081,47 @@ class SteamMonitorStore:
                     prof_rows,
                 )
             if session_rows:
-                db.executemany(
+                # Re-verify inside the serialized write transaction that each
+                # steam_id is still monitored by at least one enabled group so an
+                # in-flight lock-free poll cannot resurrect sessions deleted by
+                # /steam off, /steam delid, /steam clear_groupids, or /steam delpush_group.
+                enabled_rows = db.execute(
                     """
-                    INSERT INTO active_sessions(
-                        steam_id, game_id, game_name, started_at, state,
-                        exited_at, exit_deadline, last_seen_at,
-                        consecutive_failures, player_name, avatar_url
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(steam_id) DO UPDATE SET
-                        game_id=excluded.game_id,
-                        game_name=excluded.game_name,
-                        started_at=excluded.started_at,
-                        state=excluded.state,
-                        exited_at=excluded.exited_at,
-                        exit_deadline=excluded.exit_deadline,
-                        last_seen_at=excluded.last_seen_at,
-                        consecutive_failures=excluded.consecutive_failures,
-                        player_name=excluded.player_name,
-                        avatar_url=excluded.avatar_url
-                    """,
-                    session_rows,
-                )
+                    SELECT DISTINCT gp.steam_id
+                    FROM group_players gp
+                    LEFT JOIN group_settings gs ON gs.group_id = gp.group_id
+                    WHERE COALESCE(gs.monitor_enabled, 1) = 1
+                    UNION
+                    SELECT DISTINCT pr.steam_id
+                    FROM push_routes pr
+                    LEFT JOIN group_settings gs ON gs.group_id = pr.target_group_id
+                    WHERE COALESCE(gs.monitor_enabled, 1) = 1
+                    """
+                ).fetchall()
+                enabled_sids = {str(r["steam_id"]) for r in enabled_rows}
+                live_session_rows = [row for row in session_rows if row[0] in enabled_sids]
+                if live_session_rows:
+                    db.executemany(
+                        """
+                        INSERT INTO active_sessions(
+                            steam_id, game_id, game_name, started_at, state,
+                            exited_at, exit_deadline, last_seen_at,
+                            consecutive_failures, player_name, avatar_url
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(steam_id) DO UPDATE SET
+                            game_id=excluded.game_id,
+                            game_name=excluded.game_name,
+                            started_at=excluded.started_at,
+                            state=excluded.state,
+                            exited_at=excluded.exited_at,
+                            exit_deadline=excluded.exit_deadline,
+                            last_seen_at=excluded.last_seen_at,
+                            consecutive_failures=excluded.consecutive_failures,
+                            player_name=excluded.player_name,
+                            avatar_url=excluded.avatar_url
+                        """,
+                        live_session_rows,
+                    )
             if del_rows:
                 db.executemany(
                     "DELETE FROM active_sessions WHERE steam_id=?",
