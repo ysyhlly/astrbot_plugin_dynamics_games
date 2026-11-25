@@ -43,6 +43,7 @@ import asyncio
 import inspect
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -105,11 +106,40 @@ class Room:
     room_id: str = field(default_factory=lambda: uuid4().hex)
     participants: dict[str, str] = field(default_factory=dict)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    _lock_owner: asyncio.Task | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.group_id = str(self.group_id or "").strip()
         self.umo = str(self.umo or "").strip()
         self.room_key = str(self.room_key or "").strip() or self.umo or self.group_id
+
+    @asynccontextmanager
+    async def locked(self):
+        """Acquire ``_lock`` and record the owning task so slow I/O can temporarily release it."""
+        cur = asyncio.current_task()
+        await self._lock.acquire()
+        self._lock_owner = cur
+        try:
+            yield
+        finally:
+            if self._lock_owner is cur and self._lock.locked():
+                self._lock_owner = None
+                self._lock.release()
+
+    @asynccontextmanager
+    async def unlocked_for_io(self):
+        """Temporarily release ``_lock`` if held by the current task during slow network/LLM/LM I/O."""
+        cur = asyncio.current_task()
+        if self._lock.locked() and self._lock_owner is cur:
+            self._lock_owner = None
+            self._lock.release()
+            try:
+                yield
+            finally:
+                await self._lock.acquire()
+                self._lock_owner = cur
+        else:
+            yield
 
 
 class RoomManager:
@@ -340,7 +370,7 @@ class RoomManager:
             return (False, "本群还没有真心话房间，请先发送 真心话 创建。")
         if caller_id != room.host_id and not is_admin:
             return (False, "只有房主或管理员可以开始游戏。")
-        async with room._lock:
+        async with room.locked():
             # identity recheck: lock.acquire() is an await point
             if self.rooms.get(rkey) is not room:
                 return (False, "房间状态已变化，请重试。")
@@ -393,7 +423,7 @@ class RoomManager:
         ):
             return (False, "只有参与玩家、房主或管理员可以推进下一题。")
         cancelled_choice: asyncio.Task | None = None
-        async with room._lock:
+        async with room.locked():
             # identity recheck after lock.acquire() (an await point)
             if self.rooms.get(rkey) is not room:
                 return (False, "房间状态已变化，请重试。")
@@ -450,7 +480,7 @@ class RoomManager:
         cancelled: list[asyncio.Task] = []
         payload: dict[str, Any] = {"left_id": user_id, "ended": False}
 
-        async with room._lock:
+        async with room.locked():
             if self.rooms.get(rkey) is not room:
                 return (False, {"error": "房间状态已变化，请重试。"})
             if room.phase == "settled":
@@ -520,7 +550,7 @@ class RoomManager:
         rkey, room = self._lookup_room(group_id, umo=umo)
         if room is None or rkey is None:
             return (False, {"error": "本群还没有进行中的真心话房间。"})
-        async with room._lock:
+        async with room.locked():
             # identity recheck after lock.acquire() (an await point)
             if self.rooms.get(rkey) is not room:
                 return (False, {"error": "房间状态已变化，请重试。"})
@@ -546,7 +576,7 @@ class RoomManager:
 
     async def end_at_limit(self, room: Room, max_questions: int) -> dict | None:
         rkey = room.room_key
-        async with room._lock:
+        async with room.locked():
             if (
                 self.rooms.get(rkey) is not room
                 or room.phase != "playing"
@@ -714,7 +744,7 @@ class RoomManager:
             return (False, "房间状态已变化")
         cancelled_choice: asyncio.Task | None = None
         result: tuple[bool, str | None] = (False, "状态已变化")
-        async with room._lock:
+        async with room.locked():
             if self.rooms.get(rkey) is not room:
                 return (False, "房间状态已变化")
             if room.phase != "playing":
@@ -760,7 +790,7 @@ class RoomManager:
             return (False, "题目不能为空，请重新发送。")
         cancelled_choice: asyncio.Task | None = None
         result: tuple[bool, str | None] = (False, "状态已变化")
-        async with room._lock:
+        async with room.locked():
             if self.rooms.get(rkey) is not room:
                 return (False, "房间状态已变化")
             if room.phase != "playing":
@@ -902,7 +932,7 @@ class RoomManager:
         summary = None
         cancelled = []
         try:
-            async with self_room._lock:
+            async with self_room.locked():
                 if self.rooms.get(group_id) is not self_room:
                     return
                 if self_room.phase != "playing":
@@ -974,7 +1004,7 @@ class RoomManager:
             cancelled = []
             text = ""
             try:
-                async with self_room._lock:
+                async with self_room.locked():
                     # identity recheck after lock.acquire() (an await point)
                     if self.rooms.get(group_id) is not self_room:
                         return
@@ -1030,7 +1060,7 @@ class RoomManager:
             if self_room.phase != "waiting":
                 return
             try:
-                async with self_room._lock:
+                async with self_room.locked():
                     # identity recheck after lock.acquire() (an await point)
                     if self.rooms.get(group_id) is not self_room:
                         return

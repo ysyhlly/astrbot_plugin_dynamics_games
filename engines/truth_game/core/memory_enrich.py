@@ -16,12 +16,15 @@ Guarantees:
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from .lm_bridge import detect_lm, ensure_ready, get_engine
 
 #: Default recall size when ``memory_k`` cannot be coerced to a positive int.
 _DEFAULT_MEMORY_K = 5
+#: Default timeout (seconds) for LivingMemory readiness + retrieval so a slow index never stalls a room.
+DEFAULT_MEMORY_TIMEOUT_SECONDS = 5.0
 
 
 def _memory_text(result: Any) -> str:
@@ -70,6 +73,7 @@ async def enrich_for_askee(
     askee_name: str,
     memory_k: int = 5,
     enabled: bool = True,
+    timeout_seconds: float = DEFAULT_MEMORY_TIMEOUT_SECONDS,
 ) -> list[str]:
     """Recall LivingMemory memories about the askee.
 
@@ -97,27 +101,32 @@ async def enrich_for_askee(
     if not enabled:
         return []
     try:
+        try:
+            budget = max(0.05, float(timeout_seconds))
+        except (TypeError, ValueError):
+            budget = DEFAULT_MEMORY_TIMEOUT_SECONDS
         plugin = detect_lm(context)
         if plugin is None:
             return []
-        if not await ensure_ready(plugin):
-            return []
-        engine = get_engine(plugin)
-        search = getattr(engine, "search_memories", None) if engine is not None else None
-        if not callable(search):
-            return []
+        async with asyncio.timeout(budget):
+            if not await ensure_ready(plugin):
+                return []
+            engine = get_engine(plugin)
+            search = getattr(engine, "search_memories", None) if engine is not None else None
+            if not callable(search):
+                return []
 
-        if (askee_name or "").strip():
-            query = f"关于 {askee_name.strip()} 的记忆"
-        else:
-            query = f"关于 {askee_id} 的记忆"
-        try:
-            k = max(1, int(memory_k))
-        except (TypeError, ValueError):
-            k = _DEFAULT_MEMORY_K
+            if (askee_name or "").strip():
+                query = f"关于 {askee_name.strip()} 的记忆"
+            else:
+                query = f"关于 {askee_id} 的记忆"
+            try:
+                k = max(1, int(memory_k))
+            except (TypeError, ValueError):
+                k = _DEFAULT_MEMORY_K
 
-        results = await search(query=query, k=k, session_id=umo)
-        return _collect_texts(results)
+            results = await search(query=query, k=k, session_id=umo)
+            return _collect_texts(results)
     except Exception:
         return []
 

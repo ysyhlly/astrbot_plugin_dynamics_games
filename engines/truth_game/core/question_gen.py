@@ -277,7 +277,12 @@ async def build_question(
     source = str(_cfg_get(config, "question_source", "llm_first") or "llm_first")
 
     rng = random.Random()
-    used_indexes: set = set()  # fresh per call (bank fallback never repeats within a call)
+    # Pre-populate used_indexes from asked_history so bank picks never repeat asked questions
+    # until the bank is exhausted.
+    asked_norm = {NORMALIZE(q) for q in (asked_history or []) if q and NORMALIZE(q)}
+    used_indexes: set[int] = {
+        idx for idx, q in enumerate(bank) if NORMALIZE(q) in asked_norm
+    }
 
     # -- bank_only: skip the LLM entirely --------------------------------
     if source == "bank_only":

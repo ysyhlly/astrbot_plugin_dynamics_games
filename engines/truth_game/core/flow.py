@@ -34,6 +34,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -180,20 +181,33 @@ async def _enrich_memories(
     *,
     enable_livingmemory: bool,
     memory_k: int,
+    memory_timeout_seconds: float = 5.0,
 ) -> list[str] | None:
-    """Optional LM enrich; failures → None, never raises."""
+    """Optional LM enrich with timeout; failures → None, never raises."""
     if not enable_livingmemory:
         return None
     try:
-        memories = await enrich_for_askee(
-            context,
-            _room_umo(room),
-            askee,
-            askee_name,
-            memory_k=memory_k,
-        )
+        budget = max(0.05, float(memory_timeout_seconds))
+    except (TypeError, ValueError):
+        budget = 5.0
+    try:
+        async with asyncio.timeout(budget):
+            memories = await enrich_for_askee(
+                context,
+                _room_umo(room),
+                askee,
+                askee_name,
+                memory_k=memory_k,
+                timeout_seconds=budget,
+            )
         if memories:
             return list(memories)
+    except TimeoutError:
+        logger.warning(
+            "[flow] enrich_for_askee timed out (%.1fs) group=%s",
+            budget,
+            room.group_id,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "[flow] enrich_for_askee failed group=%s: %s", room.group_id, exc
@@ -241,23 +255,29 @@ async def resolve_bot_question(
     asker, askee = _pair_askee(room)
     enable_lm = _cfg_bool(config, "enable_livingmemory", True)
     memory_k = _cfg_int(config, "memory_k", 5)
+    memory_timeout = _cfg_float(config, "memory_timeout_seconds", 5.0)
     players = {pid: p.nickname for pid, p in room.players.items()}
     askee_name = players.get(askee, askee or "")
-    memory_context = await _enrich_memories(
-        room,
-        context,
-        askee,
-        askee_name,
-        enable_livingmemory=enable_lm,
-        memory_k=memory_k,
-    )
-    question = await _safe_build_question(
-        room,
-        context,
-        config,
-        memory_context=memory_context,
-        askee_name=askee_name,
-    )
+    snap_advance_count = room.advance_count
+    async with room.unlocked_for_io():
+        memory_context = await _enrich_memories(
+            room,
+            context,
+            askee,
+            askee_name,
+            enable_livingmemory=enable_lm,
+            memory_k=memory_k,
+            memory_timeout_seconds=memory_timeout,
+        )
+        question = await _safe_build_question(
+            room,
+            context,
+            config,
+            memory_context=memory_context,
+            askee_name=askee_name,
+        )
+    if room.phase != "playing" or room.advance_count != snap_advance_count:
+        return ""
     # Keep human asker on last_pair when present; only fill if missing.
     if room.last_pair is not None:
         asker, askee = room.last_pair
@@ -338,23 +358,29 @@ def build_advance_hook(
                 )
                 return _choice_prompt(asker, askee, timeout)
 
-            # ---- bot asker: immediate question + bookkeeping ----
+            # ---- bot asker: immediate question + bookkeeping (I/O outside room lock) ----
             askee_name = players.get(askee, askee)
-            memory_context = await _enrich_memories(
-                room,
-                context,
-                askee,
-                askee_name,
-                enable_livingmemory=enable_livingmemory,
-                memory_k=memory_k,
-            )
-            question = await _safe_build_question(
-                room,
-                context,
-                config,
-                memory_context=memory_context,
-                askee_name=askee_name,
-            )
+            snap_advance_count = room.advance_count
+            memory_timeout = _cfg_float(config, "memory_timeout_seconds", 5.0)
+            async with room.unlocked_for_io():
+                memory_context = await _enrich_memories(
+                    room,
+                    context,
+                    askee,
+                    askee_name,
+                    enable_livingmemory=enable_livingmemory,
+                    memory_k=memory_k,
+                    memory_timeout_seconds=memory_timeout,
+                )
+                question = await _safe_build_question(
+                    room,
+                    context,
+                    config,
+                    memory_context=memory_context,
+                    askee_name=askee_name,
+                )
+            if room.phase != "playing" or room.advance_count != snap_advance_count:
+                return ""
             _bookkeep_question(room, asker, askee, question)
             return question
 

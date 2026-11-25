@@ -127,38 +127,20 @@ def _extract_star_owner(star: Any) -> Any | None:
     return owner if _is_usable_plugin(owner) else None
 
 
-#: 优先探测 Dynamics Memory 公开门面，再回退旧版 LivingMemory 门面与旧私有路径。
-_facade_active_getters: list[Any] = []
-_merged_aliases: list[str] = list(_SHARED_LM_ALIASES)
-
-for _mod_name in _LM_FACADE_MODULES:
-    try:
-        _mod = importlib.import_module(_mod_name)
-    except Exception:
-        continue
-    _aliases = getattr(_mod, "ALIASES", None)
-    if _aliases:
-        for _alias in _aliases:
-            if _alias and _alias not in _merged_aliases:
-                _merged_aliases.append(_alias)
-    _getter = getattr(_mod, "get_active_plugin", None)
-    if callable(_getter):
-        _facade_active_getters.append(_getter)
-
-#: 旧私有路径（仅当门面不可用时使用；旧版本 LivingMemory 没有 ``api`` 包）。
-try:
-    from astrbot_plugin_livingmemory.core.passive_group_capture import (
-        get_active_plugin as _lm_legacy_get_active,
-    )
-except Exception:  # ImportError or any plugin load error -> LivingMemory absent
-    _lm_legacy_get_active = None
-
-if callable(_lm_legacy_get_active):
-    _facade_active_getters.append(_lm_legacy_get_active)
+#: 优先探测 Dynamics Memory 公开门面，再回退旧版 LivingMemory 门面与旧私有路径（每次调用懒解析，防热重载失效）。
+_LEGACY_ACTIVE_MODULE = "astrbot_plugin_livingmemory.core.passive_group_capture"
 
 
 def _combined_get_active() -> Any | None:
-    for getter in _facade_active_getters:
+    """Lazily resolve ``get_active_plugin`` from current sys.modules/facade modules on every call."""
+    for mod_name in (*_LM_FACADE_MODULES, _LEGACY_ACTIVE_MODULE):
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        getter = getattr(mod, "get_active_plugin", None)
+        if not callable(getter):
+            continue
         try:
             inst = getter()
         except Exception:
@@ -168,13 +150,28 @@ def _combined_get_active() -> Any | None:
     return None
 
 
-#: PRIMARY weakref reader. Dynamics Memory / LivingMemory facade first, legacy fallback.
-_lm_get_active = _combined_get_active if _facade_active_getters else None
+#: PRIMARY weakref reader (lazy per-call module lookup; still monkeypatchable in tests).
+_lm_get_active = _combined_get_active
 
-#: Plugin identities checked against ``context.get_registered_star`` and
-#: against star metadata fields (name / display_name / root_dir_name /
-#: module_path), case-insensitively.
-_LM_ALIASES: tuple[str, ...] = tuple(_merged_aliases)
+
+def _current_lm_aliases() -> tuple[str, ...]:
+    """Lazily merge shared aliases with any live facade ALIASES."""
+    merged: list[str] = list(_SHARED_LM_ALIASES)
+    for mod_name in _LM_FACADE_MODULES:
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        aliases = getattr(mod, "ALIASES", None)
+        if aliases:
+            for alias in aliases:
+                if alias and alias not in merged:
+                    merged.append(alias)
+    return tuple(merged)
+
+
+#: Baseline aliases tuple kept for backward compatibility.
+_LM_ALIASES: tuple[str, ...] = tuple(_SHARED_LM_ALIASES)
 
 
 def _facade_fn(name: str):
@@ -247,7 +244,7 @@ def detect_lm(context: Any) -> Any | None:
     except Exception:
         lookup = None
     if callable(lookup):
-        for alias in _LM_ALIASES:
+        for alias in _current_lm_aliases():
             try:
                 star = lookup(alias)
             except Exception:

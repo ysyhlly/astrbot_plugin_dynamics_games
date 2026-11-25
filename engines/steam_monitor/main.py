@@ -2883,7 +2883,7 @@ class SteamMonitorEngine(Component):
         save_fn = getattr(self.config, "save_config", None)
         if callable(save_fn):
             try:
-                save_fn()
+                await asyncio.to_thread(save_fn)
             except Exception as exc:
                 self.logger.warning("[SteamMonitor] 保存配置失败: %s", exc)
 

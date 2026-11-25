@@ -201,8 +201,10 @@ class ImageManager:
             food_name = self._extract_food_name(filename)
 
             if food_name:
-                # 转换为绝对路径
+                # 转换为绝对路径（越界穿越路径返回空字符串并跳过）
                 full_path = self._get_full_path(filepath)
+                if not full_path:
+                    continue
 
                 if food_name not in result:
                     result[food_name] = []
@@ -210,23 +212,62 @@ class ImageManager:
 
         return result
 
+    def _candidate_upload_roots(self) -> list[str]:
+        """Return ordered candidate root dirs for relative uploaded_images paths."""
+        roots: list[str] = []
+        try:
+            from astrbot.api.star import StarTools
+
+            for pid in ("astrbot_plugin_dynamics_games", "astrbot_plugin_what_to_eat"):
+                raw = StarTools.get_data_dir(pid)
+                if raw:
+                    r = os.path.abspath(str(raw))
+                    if r not in roots:
+                        roots.append(r)
+        except Exception:
+            pass
+        # Host plugin root (engines/what_to_eat -> plugin root)
+        plugin_abs = os.path.abspath(self.plugin_dir)
+        parent1 = os.path.dirname(plugin_abs)
+        host_root = (
+            os.path.dirname(parent1)
+            if os.path.basename(parent1) == "engines"
+            else plugin_abs
+        )
+        for cand in (host_root, plugin_abs):
+            if cand and cand not in roots:
+                roots.append(cand)
+        return roots
+
     def _get_full_path(self, relative_path: str) -> str:
         """
-        将相对路径转换为绝对路径。
+        将相对路径转换为绝对路径，兼容嵌入式引擎与宿主插件/数据目录。
 
         Args:
-            relative_path: 相对于插件目录的路径（如 files/xxx/yyy.jpg）
+            relative_path: 相对或绝对图片路径（如 files/xxx/yyy.jpg）
 
         Returns:
-            绝对路径
+            绝对路径（拒绝越界目录穿越路径，返回空字符串）
         """
-        # 如果已经是绝对路径，直接返回
         if os.path.isabs(relative_path):
             return relative_path
 
-        # 相对于插件数据目录（files/ 在插件数据目录下）
-        # AstrBot 上传的文件保存在 data/plugins/插件名/files/
-        return os.path.join(self.plugin_dir, relative_path)
+        cleaned = relative_path.strip().lstrip("/\\")
+        roots = self._candidate_upload_roots()
+        fallback = ""
+        for root in roots:
+            root_real = os.path.realpath(root)
+            joined = os.path.realpath(os.path.join(root_real, cleaned))
+            try:
+                if os.path.commonpath([root_real, joined]) != root_real:
+                    continue
+            except ValueError:
+                continue
+            if not fallback:
+                fallback = joined
+            if os.path.isfile(joined):
+                return joined
+        return fallback
 
     def _merge_images(
         self,

@@ -241,11 +241,18 @@ class TasteMemoryStore:
         max_recent: int = 20,
         avoid_recent_count: int = 6,
         learn_from_message: bool = True,
+        feedback_window_seconds: float = 1800.0,
     ) -> None:
         self.enabled = bool(enabled)
         self.max_recent = max(5, min(50, int(max_recent)))
         self.avoid_recent_count = max(0, min(30, int(avoid_recent_count)))
         self.auto_learn = bool(learn_from_message)
+        try:
+            self.feedback_window_seconds = max(
+                60.0, float(feedback_window_seconds)
+            )
+        except (TypeError, ValueError):
+            self.feedback_window_seconds = 1800.0
         self._lock = threading.RLock()
         self._profiles: dict[str, UserTasteProfile] = {}
         self._path = self._resolve_path(data_dir, legacy_data_dir=legacy_data_dir)
@@ -505,15 +512,36 @@ class TasteMemoryStore:
             profile.updated_at = _now_ts()
             self._save()
 
-    def apply_feedback(self, user_id: str, *, positive: bool) -> str | None:
-        """对最近一次推荐做反馈，返回被反馈的菜名。"""
+    def apply_feedback(
+        self,
+        user_id: str,
+        *,
+        positive: bool,
+        group_id: str = "",
+        now: float | None = None,
+        window_seconds: float | None = None,
+    ) -> str | None:
+        """对最近一次推荐做反馈（仅在时间窗与同会话内生效），返回被反馈的菜名。"""
         if not self.enabled:
             return None
+        cur_ts = float(now) if now is not None else _now_ts()
+        window = (
+            max(0.0, float(window_seconds))
+            if window_seconds is not None
+            else self.feedback_window_seconds
+        )
         with self._lock:
             profile = self.get_profile(user_id)
             if not profile.recent:
                 return None
             last = profile.recent[-1]
+            last_ts = float(last.get("ts") or 0.0)
+            if last_ts <= 0.0 or (cur_ts - last_ts) > window or (last_ts - cur_ts) > 60.0:
+                return None
+            last_gid = str(last.get("group_id") or "").strip()
+            clean_gid = str(group_id or "").strip()
+            if clean_gid and last_gid and clean_gid != last_gid:
+                return None
             food = str(last.get("food") or "").strip()
             if not food:
                 return None
@@ -529,13 +557,20 @@ class TasteMemoryStore:
                 if key and key not in profile.likes:
                     profile.likes.append(key)
                 profile.dislikes = [x for x in profile.dislikes if x != key]
-            profile.updated_at = _now_ts()
+            profile.updated_at = cur_ts
             self._save()
             return food
 
-    def learn_from_message(self, user_id: str, message: str) -> dict[str, list[str]]:
+    def learn_from_message(
+        self,
+        user_id: str,
+        message: str,
+        *,
+        group_id: str = "",
+        now: float | None = None,
+    ) -> dict[str, list[str]]:
         """
-        从用户消息里抽取口味，并处理「好吃/难吃」反馈。
+        从用户消息里抽取口味，并处理时间窗内的「好吃/难吃」反馈。
 
         Returns:
             {"likes": [...], "dislikes": [...], "allergies": [...], "feedback": [...]}
@@ -563,14 +598,18 @@ class TasteMemoryStore:
         if allergies:
             result["allergies"] = self.add_allergies(user_id, allergies)
 
-        # 对最近推荐的反馈（消息较短时更可能是反馈）
+        # 对最近推荐的反馈（仅在反馈时间窗内生效，防止旧推荐在数小时/数天后被闲聊误学）
         if len(text) <= 40:
             if _POSITIVE_FEEDBACK.search(text):
-                food = self.apply_feedback(user_id, positive=True)
+                food = self.apply_feedback(
+                    user_id, positive=True, group_id=group_id, now=now
+                )
                 if food:
                     result["feedback"] = [f"+{food}"]
             elif _NEGATIVE_FEEDBACK.search(text):
-                food = self.apply_feedback(user_id, positive=False)
+                food = self.apply_feedback(
+                    user_id, positive=False, group_id=group_id, now=now
+                )
                 if food:
                     result["feedback"] = [f"-{food}"]
 

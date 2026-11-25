@@ -373,7 +373,7 @@ class GamesWebConsole:
         body = await self._body()
         key = str(body.get("key") or "").strip()
         enabled = bool(body.get("enabled", True))
-        self.plugin.set_module_enabled(key, enabled)
+        await asyncio.to_thread(self.plugin.set_module_enabled, key, enabled)
         return {
             "key": key,
             "enabled": self.plugin.module_enabled(key),

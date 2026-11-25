@@ -790,6 +790,32 @@ class DynamicsGamesPlugin(Star):
         except Exception:
             return []
 
+    async def get_series_summary_async(self) -> dict[str, Any]:
+        """Offload SQLite summary aggregation to a worker thread for async callers."""
+        return await asyncio.to_thread(self.get_series_summary)
+
+    async def get_series_scope_status_async(self, umo: str) -> dict[str, Any]:
+        """Offload per-group SQLite scope status to a worker thread."""
+        return await asyncio.to_thread(self.get_series_scope_status, umo)
+
+    async def series_search_items_async(
+        self, query: str, scope: str = "", limit: int = 8
+    ) -> list[dict[str, Any]]:
+        """Offload federated SQLite search to a worker thread."""
+        return await asyncio.to_thread(self.series_search_items, query, scope, limit)
+
+    async def get_journal_events_async(
+        self,
+        persona: str = "",
+        scope: str = "",
+        date: str = "today",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Offload journal SQLite query to a worker thread."""
+        return await asyncio.to_thread(
+            self.get_journal_events, persona, scope, date, limit
+        )
+
     # ------------------------------------------------------------------
     # LLM Tools (Group Activity Awareness)
     # ------------------------------------------------------------------

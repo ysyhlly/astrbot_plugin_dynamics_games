@@ -12,6 +12,7 @@ DEFAULT_LLM_TIMEOUT_SECONDS = 20.0
 try:
     from ...series_panels import (
         find_provider_silently,
+        get_series_defaults,
         is_provider_budget_busy_error,
         resolve_series_provider,
         series_llm_call,
@@ -23,6 +24,9 @@ except Exception:  # pragma: no cover - standalone fallback
         _ = allow_fallback
         getter = getattr(context, "get_provider_by_id", None)
         return getter(provider_id) if callable(getter) else None
+
+    def get_series_defaults(_context: Any) -> dict[str, Any]:
+        return {}
 
     def is_provider_budget_busy_error(_exc: BaseException | None) -> bool:
         return False
@@ -133,11 +137,22 @@ class PersonaLLMResponder:
 
         persona_prompt = ""
 
-        # 1) 插件强制指定
-        if self.persona_id and self.persona_id != "[%None]":
-            persona_prompt = await self._get_persona_prompt(persona_mgr, self.persona_id)
+        # 1) 插件强制指定或调用期懒继承主控共享默认人格
+        effective_persona_id = self.persona_id
+        if not effective_persona_id:
+            try:
+                effective_persona_id = str(
+                    (get_series_defaults(self.context) or {}).get("persona_id", "")
+                    or ""
+                ).strip()
+            except Exception:
+                effective_persona_id = ""
+        if effective_persona_id and effective_persona_id != "[%None]":
+            persona_prompt = await self._get_persona_prompt(
+                persona_mgr, effective_persona_id
+            )
             if persona_prompt:
-                logger.debug("吃什么插件使用指定人格: %s", self.persona_id)
+                logger.debug("吃什么插件使用指定/继承人格: %s", effective_persona_id)
 
         # 2) 继承会话人格
         if not persona_prompt and self.use_session_persona and umo:

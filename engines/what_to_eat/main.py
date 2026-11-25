@@ -173,12 +173,10 @@ class WhatToEatPlugin(Component):
         )
         self.responder = Responder(probability)
 
-        # LLM + 人格（失败时自动回退模板）
+        # LLM + 人格（调用期懒继承主控默认模型与人格，避免冷启动或热重载时冻结旧值）
         llm_enabled = bool(config.get("llm_enabled", True))
-        llm_provider_id = _inherit_provider(config.get("llm_provider_id", ""), context)
+        llm_provider_id = str(config.get("llm_provider_id", "") or "").strip()
         llm_persona_id = str(config.get("llm_persona_id", "") or "").strip()
-        if not llm_persona_id:
-            llm_persona_id = str(_series_defaults(context).get("persona_id", "") or "").strip()
         llm_use_session_persona = bool(config.get("llm_use_session_persona", True))
         llm_also_for_echo = bool(config.get("llm_also_for_echo", True))
         self.persona_llm = PersonaLLMResponder(
@@ -334,11 +332,17 @@ class WhatToEatPlugin(Component):
         user_id = str(event.get_sender_id() or "")
         nickname = self._get_sender_name(event)
 
-        # 闲聊中自动学习口味 / 对最近推荐做反馈（不阻断其它插件）
+        # 闲聊中自动学习口味 / 对时间窗内最近推荐做反馈（卸载到后台线程防阻塞事件循环）
         if self.taste_memory.enabled and user_id:
             # 指令消息跳过自动学习，避免和命令重复
             if not self._looks_like_taste_command(message_text):
-                learned = self.taste_memory.learn_from_message(user_id, message_text)
+                msg_gid = str(event.get_group_id() or user_id)
+                learned = await asyncio.to_thread(
+                    self.taste_memory.learn_from_message,
+                    user_id,
+                    message_text,
+                    group_id=msg_gid,
+                )
                 if any(learned.get(k) for k in ("likes", "dislikes", "allergies", "feedback")):
                     logger.debug("口味自动学习 user=%s: %s", user_id, learned)
 
@@ -383,7 +387,9 @@ class WhatToEatPlugin(Component):
             umo = event.unified_msg_origin
             taste_summary = None
             if self.taste_memory.enabled and user_id:
-                self.taste_memory.touch_nickname(user_id, nickname)
+                await asyncio.to_thread(
+                    self.taste_memory.touch_nickname, user_id, nickname
+                )
                 taste_summary = self.taste_memory.get_profile(user_id).summary_text()
 
             if should_recommend:
@@ -398,7 +404,8 @@ class WhatToEatPlugin(Component):
                     )
 
                     if food and self.taste_memory.enabled and user_id:
-                        self.taste_memory.record_recommendation(
+                        await asyncio.to_thread(
+                            self.taste_memory.record_recommendation,
                             user_id,
                             food,
                             group_id=str(group_id or ""),
