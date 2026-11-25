@@ -1,7 +1,7 @@
 name: astrbot_plugin_dynamics_games
 display_name: 群间游戏 · Dynamics Games
 desc: 群间系列协作活动与娱乐插件：围绕「一起完成一件事」组织共读、约局、接龙、挑战与共创，联动群间记忆与群间史记，并整合真心话、21点、今日小猪、吃什么与 Steam 状态监控五大娱乐引擎。
-version: v0.1.2-rc.1
+version: v0.1.2-rc.2
 author: ysyhlly
 astrbot_version: ">=4.29.4,<5"
 support_platforms:

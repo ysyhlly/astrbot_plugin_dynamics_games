@@ -1,4 +1,11 @@
-# astrbot_plugin_dynamics_games v0.1.2-rc.1
+# astrbot_plugin_dynamics_games v0.1.2-rc.2
+
+## v0.1.2-rc.2 — 2026-11-25
+
+- 安全加固（Batch 1）：收紧作用域边界、加固 SSRF/URL 校验并接入全系列统一管理鉴权。
+- 数据与存储修复（Batch 2）：消除线程局部 SQLite 连接泄漏、修复保留期清理并加固游戏存储。
+- 性能与运行时优化（Batch 3）：热点 I/O 异步化并加固游戏子模块运行时异常处理。
+- 稳定性与发布治理（Batch 4）：修复 Steam 监控与真心话 P0 问题、完善适配器隔离与代码卫生并同步系列共享资产。
 
 ## v0.1.2-rc.1 — 2026-11-24
 
