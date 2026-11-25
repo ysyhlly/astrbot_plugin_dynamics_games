@@ -7,11 +7,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import ssl
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
+from urllib.parse import urlsplit
 
 from astrbot.api import logger
 
@@ -34,7 +37,11 @@ from .state_machine import (
     natural_day_bounds,
     should_skip_game,
 )
-from .steam_client import SteamClient
+from .steam_client import (
+    ALLOWED_CA_FILE_EXTENSIONS,
+    SteamClient,
+    validate_api_base_url,
+)
 from .store import SteamMonitorStore
 
 try:
@@ -92,6 +99,12 @@ DEFAULT_TRANSLATE_TIMEOUT_SECONDS = 10.0
 
 SECRET_CONFIG_KEYS: frozenset[str] = frozenset(
     {"steam_api_key", "sgdb_api_key", "itad_api_key"}
+)
+API_BASE_CONFIG_KEYS: frozenset[str] = frozenset(
+    {"steam_api_base", "steam_store_base", "sgdb_api_base", "itad_api_base"}
+)
+SENSITIVE_CONFIG_KEYS: frozenset[str] = (
+    SECRET_CONFIG_KEYS | API_BASE_CONFIG_KEYS | frozenset({"ssl_ca_file", "proxy_url"})
 )
 
 VALID_FILTER_MODES: frozenset[str] = frozenset({"全部游戏", "白名单", "黑名单"})
@@ -2750,6 +2763,64 @@ class SteamMonitorEngine(Component):
                 lines.append(f"• {key}: {val}")
         yield event.plain_result("\n".join(lines))
 
+    @classmethod
+    def _is_group_chat(cls, event: Any) -> bool:
+        if cls._group_id(event):
+            return True
+        umo = cls._session_umo(event)
+        if ":GroupMessage:" in umo:
+            return True
+        return False
+
+    def _validate_ssl_ca_file(self, raw_path: str) -> str:
+        val = str(raw_path or "").strip()
+        if not val:
+            return ""
+        if "\x00" in val or ".." in Path(val).parts:
+            raise ValueError("ssl_ca_file 路径不允许包含非法字符或上级目录穿越")
+        expanded = Path(os.path.expanduser(val))
+        if expanded.suffix.lower() not in ALLOWED_CA_FILE_EXTENSIONS:
+            raise ValueError(
+                f"ssl_ca_file 仅允许证书文件扩展名（{', '.join(sorted(ALLOWED_CA_FILE_EXTENSIONS))}）"
+            )
+        resolved = expanded.resolve()
+        if not resolved.is_file():
+            raise ValueError("ssl_ca_file 指向的文件不存在或不是普通文件")
+        allowed_roots: list[Path] = []
+        if self.data_dir is not None:
+            allowed_roots.append(self.data_dir.resolve())
+        for sys_root in ("/etc/ssl/certs", "/etc/pki/tls/certs"):
+            p = Path(sys_root)
+            if p.exists():
+                allowed_roots.append(p.resolve())
+        if not allowed_roots or not any(
+            resolved == root or root in resolved.parents for root in allowed_roots
+        ):
+            raise ValueError(
+                "ssl_ca_file 仅允许位于插件数据目录或系统 CA 证书目录内"
+            )
+        try:
+            ssl.create_default_context(cafile=str(resolved))
+        except Exception as exc:
+            raise ValueError(f"ssl_ca_file 不是有效的 CA 证书文件：{exc}") from exc
+        return str(resolved)
+
+    @staticmethod
+    def _validate_proxy_url(raw_url: str) -> str:
+        val = str(raw_url or "").strip()
+        if not val:
+            return ""
+        sp = urlsplit(val)
+        if (sp.scheme or "").lower() not in {"http", "https", "socks5", "socks5h"}:
+            raise ValueError("proxy_url 仅支持 http/https/socks5/socks5h 协议")
+        if not sp.hostname:
+            raise ValueError("proxy_url 缺少有效主机名")
+        try:
+            _ = sp.port
+        except ValueError as exc:
+            raise ValueError("proxy_url 端口无效") from exc
+        return val
+
     async def cmd_set(
         self, event: Any, key: str = "", value: str = ""
     ) -> AsyncIterator[Any]:
@@ -2765,6 +2836,12 @@ class SteamMonitorEngine(Component):
                 "enable_network_fluctuation_notify, notify_send_image, notify_send_text, "
                 "game_filter_mode, game_filter_ids, rank_push_hour, rank_push_minute, "
                 "price_currency, price_region, price_compare_regions, detailed_poll_log 等。"
+            )
+            return
+
+        if k in SENSITIVE_CONFIG_KEYS and self._is_group_chat(event):
+            yield event.plain_result(
+                f"❌ 安全限制：禁止在群聊中修改敏感配置项（{k}），请使用管理员私聊或 AstrBot 管理面板配置。"
             )
             return
 
@@ -2792,6 +2869,12 @@ class SteamMonitorEngine(Component):
                 parsed = v_raw
                 if k == "game_filter_mode" and parsed not in VALID_FILTER_MODES:
                     raise ValueError("game_filter_mode 仅支持：全部游戏 / 白名单 / 黑名单")
+                elif k in API_BASE_CONFIG_KEYS:
+                    parsed = validate_api_base_url(k, parsed)
+                elif k == "ssl_ca_file":
+                    parsed = self._validate_ssl_ca_file(parsed)
+                elif k == "proxy_url":
+                    parsed = self._validate_proxy_url(parsed)
         except Exception as exc:
             yield event.plain_result(f"❌ 参数值无效：{exc}")
             return

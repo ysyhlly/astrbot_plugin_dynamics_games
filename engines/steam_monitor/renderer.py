@@ -14,6 +14,8 @@ from typing import Any, Callable
 from astrbot.api import logger
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from .steam_client import sanitize_avatar_frame_url, sanitize_render_image_url
+
 STEAM_CARD_TEMP_PREFIX = "steam_card_"
 STEAM_CARD_TEMP_SUFFIX = ".png"
 DEFAULT_STALE_TEMP_MAX_AGE_SECONDS = 3600.0
@@ -369,12 +371,12 @@ class SteamCardRenderer:
             "card_width": 680,
             "player_name": player_name,
             "player_initial": _initial_char(player_name),
-            "avatar_url": str(data.get("avatar_url") or "").strip(),
-            "avatar_frame_url": str(data.get("avatar_frame_url") or "").strip(),
+            "avatar_url": sanitize_render_image_url(data.get("avatar_url")),
+            "avatar_frame_url": sanitize_avatar_frame_url(data.get("avatar_frame_url")),
             "game_name": game_name,
             "game_name_en": game_name_en,
             "appid": appid,
-            "cover_url": cover_url,
+            "cover_url": sanitize_render_image_url(cover_url),
             "online_count": online_count,
             "online_count_text": online_count_text,
             "timestamp": timestamp,
@@ -430,12 +432,12 @@ class SteamCardRenderer:
             "card_width": 680,
             "player_name": player_name,
             "player_initial": _initial_char(player_name),
-            "avatar_url": str(data.get("avatar_url") or "").strip(),
-            "avatar_frame_url": str(data.get("avatar_frame_url") or "").strip(),
+            "avatar_url": sanitize_render_image_url(data.get("avatar_url")),
+            "avatar_frame_url": sanitize_avatar_frame_url(data.get("avatar_frame_url")),
             "game_name": game_name,
             "game_name_en": game_name_en,
             "appid": appid,
-            "cover_url": cover_url,
+            "cover_url": sanitize_render_image_url(cover_url),
             "duration_text": duration_text,
             "timestamp": timestamp,
             "tip": tip,
@@ -469,7 +471,7 @@ class SteamCardRenderer:
                 item.get("display_name") or item.get("name") or item.get("apiname") or "未知成就"
             )
             description = str(item.get("description") or "").strip()
-            icon = str(item.get("icon") or item.get("icon_url") or "").strip()
+            icon = sanitize_render_image_url(item.get("icon") or item.get("icon_url"))
             raw_pct = item.get("percent")
             if raw_pct is None:
                 raw_pct = item.get("global_percent")
@@ -494,11 +496,11 @@ class SteamCardRenderer:
             "card_width": 720,
             "player_name": player_name,
             "player_initial": _initial_char(player_name),
-            "avatar_url": str(data.get("avatar_url") or "").strip(),
-            "avatar_frame_url": str(data.get("avatar_frame_url") or "").strip(),
+            "avatar_url": sanitize_render_image_url(data.get("avatar_url")),
+            "avatar_frame_url": sanitize_avatar_frame_url(data.get("avatar_frame_url")),
             "game_name": game_name,
             "appid": appid,
-            "cover_url": cover_url,
+            "cover_url": sanitize_render_image_url(cover_url),
             "timestamp": timestamp,
             "achievements": norm_achs,
         }
@@ -590,14 +592,14 @@ class SteamCardRenderer:
                 "player_name": pname,
                 "initial": _initial_char(pname),
                 "steam_id": sid,
-                "avatar_url": str(item.get("avatar_url") or item.get("avatarfull") or "").strip(),
-                "avatar_frame_url": str(item.get("avatar_frame_url") or "").strip(),
+                "avatar_url": sanitize_render_image_url(item.get("avatar_url") or item.get("avatarfull")),
+                "avatar_frame_url": sanitize_avatar_frame_url(item.get("avatar_frame_url")),
                 "bucket": bucket,
                 "dot_class": dot_class,
                 "status_text": status_text,
                 "game_name": game_name or ("未知游戏" if bucket == "ingame" else ""),
                 "game_id": game_id,
-                "cover_url": cover_url,
+                "cover_url": sanitize_render_image_url(cover_url),
                 "duration_text": dur_text,
                 "last_logoff_text": last_logoff_text,
                 "group_label": str(item.get("group_label") or "").strip(),
@@ -727,7 +729,9 @@ class SteamCardRenderer:
                 if not top_game_name:
                     top_game_name = norm_games[0]["name"]
 
-            top_cover_url = str(item.get("top_cover_url") or item.get("cover_url") or "").strip()
+            top_cover_url = sanitize_render_image_url(
+                item.get("top_cover_url") or item.get("cover_url")
+            )
             if not top_cover_url and top_game_id:
                 top_cover_url = steam_header_url(top_game_id)
 
@@ -738,7 +742,7 @@ class SteamCardRenderer:
                     "player_name": pname,
                     "initial": _initial_char(pname),
                     "steam_id": str(item.get("steam_id") or item.get("sid") or "").strip(),
-                    "avatar_url": str(item.get("avatar_url") or "").strip(),
+                    "avatar_url": sanitize_render_image_url(item.get("avatar_url")),
                     "total_seconds": total_sec,
                     "total_hours": total_sec / 3600.0,
                     "total_duration_text": _format_duration_cn(seconds=total_sec),
@@ -834,9 +838,9 @@ class SteamCardRenderer:
         appid = str(data.get("appid") or data.get("game_id") or "").strip()
         name = str(data.get("name") or data.get("game_name") or (f"App {appid}" if appid else "未知游戏"))
         name_en = str(data.get("name_en") or "").strip()
-        header_url = str(
-            data.get("header_url") or data.get("header_image") or data.get("cover_url") or ""
-        ).strip()
+        header_url = sanitize_render_image_url(
+            data.get("header_url") or data.get("header_image") or data.get("cover_url")
+        )
         if not header_url and appid:
             header_url = steam_header_url(appid)
 
@@ -1080,10 +1084,10 @@ class SteamCardRenderer:
             or steam_id
             or "未知玩家"
         )
-        avatar_url = str(
-            data.get("avatar_url") or summary.get("avatarfull") or summary.get("avatar") or ""
-        ).strip()
-        avatar_frame_url = str(data.get("avatar_frame_url") or "").strip()
+        avatar_url = sanitize_render_image_url(
+            data.get("avatar_url") or summary.get("avatarfull") or summary.get("avatar")
+        )
+        avatar_frame_url = sanitize_avatar_frame_url(data.get("avatar_frame_url"))
         profile_url = str(data.get("profile_url") or summary.get("profileurl") or "").strip()
         steam_level = _to_int(data.get("steam_level"))
 
@@ -1174,7 +1178,7 @@ class SteamCardRenderer:
                 f_hrs = _to_float(g.get("playtime_forever")) / 60.0
             else:
                 f_hrs = None
-            cover = str(g.get("cover_url") or "").strip() or steam_header_url(aid)
+            cover = sanitize_render_image_url(g.get("cover_url")) or steam_header_url(aid)
             recent_games.append(
                 {
                     "appid": aid,
@@ -1200,7 +1204,7 @@ class SteamCardRenderer:
                 f_hrs = _to_float(g.get("playtime_minutes")) / 60.0
             else:
                 f_hrs = _to_float(g.get("playtime_forever")) / 60.0
-            cover = str(g.get("cover_url") or "").strip() or steam_header_url(aid)
+            cover = sanitize_render_image_url(g.get("cover_url")) or steam_header_url(aid)
             top_parsed.append(
                 {
                     "appid": aid,

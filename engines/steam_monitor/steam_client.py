@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 import inspect
+import ipaddress
 import json
 import os
 import re
@@ -13,7 +14,7 @@ import time
 from html import unescape
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 import httpx
 from astrbot.api import logger
@@ -31,6 +32,183 @@ DEFAULT_STEAM_API_BASE = "https://api.steampowered.com"
 DEFAULT_STEAM_STORE_BASE = "https://store.steampowered.com"
 DEFAULT_SGDB_API_BASE = "https://www.steamgriddb.com/api/v2"
 DEFAULT_ITAD_API_BASE = "https://api.isthereanydeal.com"
+
+ALLOWED_API_BASE_DOMAINS: dict[str, tuple[str, ...]] = {
+    "steam_api_base": ("steampowered.com",),
+    "steam_store_base": ("steampowered.com",),
+    "sgdb_api_base": ("steamgriddb.com",),
+    "itad_api_base": ("isthereanydeal.com",),
+}
+ALLOWED_AVATAR_FRAME_DOMAINS: tuple[str, ...] = (
+    "steamstatic.com",
+    "steamcdn-a.akamaihd.net",
+    "steamcommunity.com",
+    "steampowered.com",
+)
+ALLOWED_CA_FILE_EXTENSIONS: frozenset[str] = frozenset({".pem", ".crt", ".cer"})
+_LOCAL_HOST_SUFFIXES: tuple[str, ...] = (
+    ".localhost",
+    ".local",
+    ".internal",
+    ".lan",
+    ".home.arpa",
+)
+_UNSAFE_URL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f\s\"'<>`]")
+
+
+def _normalize_hostname(host: str | None) -> str:
+    return str(host or "").strip().rstrip(".").lower()
+
+
+def _is_host_in_domains(host: str, domains: tuple[str, ...]) -> bool:
+    clean = _normalize_hostname(host)
+    if not clean:
+        return False
+    return any(clean == dom or clean.endswith(f".{dom}") for dom in domains)
+
+
+def _is_private_or_local_host(host: str) -> bool:
+    clean = _normalize_hostname(host)
+    if not clean:
+        return True
+    if clean == "localhost" or clean.endswith(_LOCAL_HOST_SUFFIXES):
+        return True
+    try:
+        ip_obj = ipaddress.ip_address(clean.strip("[]"))
+    except ValueError:
+        # Reject single-label hostnames (e.g. "redis", "metadata") and numeric IP aliases
+        if "." not in clean:
+            return True
+        if clean.isdigit():
+            return True
+        return False
+    mapped = getattr(ip_obj, "ipv4_mapped", None)
+    if mapped is not None:
+        ip_obj = mapped
+    return bool(
+        ip_obj.is_private
+        or ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_reserved
+        or ip_obj.is_unspecified
+    )
+
+
+def _origin_tuple(url: str) -> tuple[str, str, int]:
+    sp = urlsplit(url)
+    scheme = (sp.scheme or "").lower()
+    host = _normalize_hostname(sp.hostname)
+    port = sp.port or (443 if scheme == "https" else 80 if scheme == "http" else 0)
+    return (scheme, host, port)
+
+
+def sanitize_avatar_frame_url(url: str | None) -> str:
+    """Strictly validate an external avatar frame URL before passing it to Playwright.
+
+    Only HTTPS URLs on official Steam CDN/community domains without credentials,
+    IP literals, private/local hosts, or non-standard ports are accepted.
+    """
+    raw = str(url or "").strip()
+    if not raw or len(raw) > 2048 or _UNSAFE_URL_CHARS_RE.search(raw):
+        return ""
+    try:
+        sp = urlsplit(raw)
+    except ValueError:
+        return ""
+    if (sp.scheme or "").lower() != "https":
+        return ""
+    if sp.username is not None or sp.password is not None:
+        return ""
+    try:
+        port = sp.port
+    except ValueError:
+        return ""
+    if port not in (None, 443):
+        return ""
+    host = _normalize_hostname(sp.hostname)
+    if not host or _is_private_or_local_host(host):
+        return ""
+    # Reject any IP literal outright for avatar frames
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return ""
+    except ValueError:
+        pass
+    if not _is_host_in_domains(host, ALLOWED_AVATAR_FRAME_DOMAINS):
+        return ""
+    return urlunsplit(("https", sp.netloc, sp.path or "/", sp.query, ""))
+
+
+def sanitize_render_image_url(url: str | None) -> str:
+    """Validate general external image URLs (avatars/covers) before Playwright rendering."""
+    raw = str(url or "").strip()
+    if not raw or len(raw) > 2048 or _UNSAFE_URL_CHARS_RE.search(raw):
+        return ""
+    try:
+        sp = urlsplit(raw)
+    except ValueError:
+        return ""
+    scheme = (sp.scheme or "").lower()
+    if scheme != "https":
+        return ""
+    if sp.username is not None or sp.password is not None:
+        return ""
+    try:
+        port = sp.port
+    except ValueError:
+        return ""
+    if port not in (None, 443):
+        return ""
+    host = _normalize_hostname(sp.hostname)
+    if not host or _is_private_or_local_host(host):
+        return ""
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return ""
+    except ValueError:
+        pass
+    return urlunsplit(("https", sp.netloc, sp.path or "/", sp.query, ""))
+
+
+def validate_api_base_url(key: str, raw_url: str) -> str:
+    """Validate an *_api_base / steam_store_base override against HTTPS + domain whitelist."""
+    val = str(raw_url or "").strip()
+    if not val:
+        return ""
+    if len(val) > 512 or _UNSAFE_URL_CHARS_RE.search(val):
+        raise ValueError(f"{key} 包含非法字符或过长")
+    try:
+        sp = urlsplit(val)
+    except ValueError as exc:
+        raise ValueError(f"{key} 不是合法的 URL") from exc
+    if (sp.scheme or "").lower() != "https":
+        raise ValueError(f"{key} 仅允许 https:// 协议")
+    if sp.username is not None or sp.password is not None:
+        raise ValueError(f"{key} 不允许包含凭据")
+    if sp.query or sp.fragment:
+        raise ValueError(f"{key} 不允许包含查询参数或片段")
+    try:
+        port = sp.port
+    except ValueError as exc:
+        raise ValueError(f"{key} 端口无效") from exc
+    if port not in (None, 443):
+        raise ValueError(f"{key} 仅允许标准 443 端口")
+    host = _normalize_hostname(sp.hostname)
+    if not host or _is_private_or_local_host(host):
+        raise ValueError(f"{key} 禁止指向本地或内网地址")
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        raise ValueError(f"{key} 禁止使用裸 IP 地址")
+    except ValueError as exc:
+        if "禁止使用裸 IP" in str(exc):
+            raise
+    allowed = ALLOWED_API_BASE_DOMAINS.get(key)
+    if allowed and not _is_host_in_domains(host, allowed):
+        raise ValueError(
+            f"{key} 域名不在白名单内（允许：{', '.join(allowed)}）"
+        )
+    return urlunsplit(("https", sp.netloc, (sp.path or "").rstrip("/"), "", ""))
 
 STEAM_CDN_APP_ASSETS = "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps"
 STEAM_COMMUNITY_ASSETS = "https://shared.fastly.steamstatic.com/community_assets/images"
@@ -266,7 +444,15 @@ class SteamClient:
             if self._ssl_cache[0]:
                 self._ssl_cache = ("", None)
             return None
+        if "\x00" in raw_path or ".." in Path(raw_path).parts:
+            logger.warning("[SteamClient] 自定义 ssl_ca_file 路径非法，回退系统 CA 证书链")
+            self._ssl_cache = ("", None)
+            return None
         resolved = os.path.abspath(os.path.expanduser(raw_path))
+        if Path(resolved).suffix.lower() not in ALLOWED_CA_FILE_EXTENSIONS:
+            logger.warning("[SteamClient] 自定义 ssl_ca_file 扩展名不受支持，回退系统 CA 证书链")
+            self._ssl_cache = (resolved, None)
+            return None
         if resolved == self._ssl_cache[0]:
             return self._ssl_cache[1]
         if not os.path.isfile(resolved):
@@ -281,6 +467,61 @@ class SteamClient:
             logger.warning("[SteamClient] 加载自定义 ssl_ca_file 失败，回退系统 CA: %s (%s)", resolved, exc)
             self._ssl_cache = (resolved, None)
             return None
+
+    async def _request_same_origin(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        *,
+        max_redirects: int = 3,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Send an HTTP request without ever following cross-origin redirects.
+
+        Protects API keys in query params or Authorization headers from leaking
+        if an upstream endpoint redirects to another host or downgrades scheme.
+        """
+        req_kwargs = dict(kwargs)
+        req_kwargs["follow_redirects"] = False
+        current_url = url
+        current_method = method.upper()
+        initial_origin = _origin_tuple(current_url)
+
+        for hop in range(max_redirects + 1):
+            if current_method == "GET":
+                resp = await client.get(current_url, **req_kwargs)
+            elif current_method == "POST":
+                resp = await client.post(current_url, **req_kwargs)
+            else:
+                resp = await client.request(current_method, current_url, **req_kwargs)
+
+            if resp.status_code not in (301, 302, 303, 307, 308):
+                return resp
+
+            location = str(resp.headers.get("location") or "").strip()
+            if not location or hop >= max_redirects:
+                return resp
+
+            next_url = urljoin(current_url, location)
+            if _origin_tuple(next_url) != initial_origin:
+                logger.warning(
+                    "[SteamClient] 已阻断携带敏感凭据的跨源重定向: %s -> %s",
+                    initial_origin,
+                    _origin_tuple(next_url),
+                )
+                return resp
+
+            current_url = next_url
+            # Query params already resolved into Location; avoid duplicating params on redirect
+            req_kwargs.pop("params", None)
+            if resp.status_code in (301, 302, 303) and current_method == "POST":
+                current_method = "GET"
+                req_kwargs.pop("json", None)
+                req_kwargs.pop("data", None)
+                req_kwargs.pop("content", None)
+
+        return resp
 
     def _httpx_kwargs(
         self,
@@ -874,13 +1115,18 @@ class SteamClient:
                         if img:
                             if not img.startswith(("http://", "https://")):
                                 img = f"{STEAM_COMMUNITY_ASSETS}/{img.lstrip('/')}"
-                            self._cache_set(
-                                self._avatar_frame_cache,
-                                sid,
-                                (img, now),
-                                MAX_AVATAR_FRAME_CACHE_SIZE,
+                            safe_img = sanitize_avatar_frame_url(img)
+                            if safe_img:
+                                self._cache_set(
+                                    self._avatar_frame_cache,
+                                    sid,
+                                    (safe_img, now),
+                                    MAX_AVATAR_FRAME_CACHE_SIZE,
+                                )
+                                return safe_img
+                            logger.warning(
+                                "[SteamClient] 拒绝非法头像框 URL (API, sid=%s): %r", sid, img
                             )
-                            return img
                         # API responded validly with empty frame object -> user has no frame
                         if "response" in payload:
                             self._cache_set(
@@ -897,8 +1143,8 @@ class SteamClient:
         profile_url = f"https://steamcommunity.com/profiles/{sid}/?l=english"
         try:
             client = await self._get_http_client(store=False)
-            resp = await client.get(
-                profile_url, timeout=10.0, follow_redirects=True
+            resp = await self._request_same_origin(
+                client, "GET", profile_url, timeout=10.0
             )
             if resp.status_code == 200:
                 html = resp.text
@@ -908,7 +1154,8 @@ class SteamClient:
                 if div_match:
                     sources = re.findall(r'(?:srcset|src)="([^"]+)"', div_match.group(1), re.IGNORECASE)
                     if sources:
-                        result = sources[-1].split(",")[0].strip().split(" ")[0].strip()
+                        raw_result = sources[-1].split(",")[0].strip().split(" ")[0].strip()
+                        result = sanitize_avatar_frame_url(raw_result)
                         if result:
                             self._cache_set(
                                 self._avatar_frame_cache,
@@ -917,20 +1164,32 @@ class SteamClient:
                                 MAX_AVATAR_FRAME_CACHE_SIZE,
                             )
                             return result
+                        if raw_result:
+                            logger.warning(
+                                "[SteamClient] 拒绝非法头像框 URL (HTML, sid=%s): %r", sid, raw_result
+                            )
                 g_match = re.search(r"g_rgProfileData\s*=\s*(\{.+?\});", html, re.DOTALL)
                 if g_match:
                     try:
                         profile = json.loads(g_match.group(1).replace(r"\/", "/"))
                         af = profile.get("avatar_frame") if isinstance(profile, dict) else None
                         if isinstance(af, dict) and af.get("url"):
-                            result = str(af["url"]).strip()
-                            self._cache_set(
-                                self._avatar_frame_cache,
-                                sid,
-                                (result, now),
-                                MAX_AVATAR_FRAME_CACHE_SIZE,
-                            )
-                            return result
+                            raw_result = str(af["url"]).strip()
+                            result = sanitize_avatar_frame_url(raw_result)
+                            if result:
+                                self._cache_set(
+                                    self._avatar_frame_cache,
+                                    sid,
+                                    (result, now),
+                                    MAX_AVATAR_FRAME_CACHE_SIZE,
+                                )
+                                return result
+                            if raw_result:
+                                logger.warning(
+                                    "[SteamClient] 拒绝非法头像框 URL (profileData, sid=%s): %r",
+                                    sid,
+                                    raw_result,
+                                )
                     except Exception:
                         pass
                 self._cache_set(
@@ -1130,11 +1389,12 @@ class SteamClient:
         # 1) Primary: storesearch JSON API
         try:
             client = await self._get_http_client(store=True)
-            resp = await client.get(
+            resp = await self._request_same_origin(
+                client,
+                "GET",
                 f"{self.steam_store_base}/api/storesearch/",
                 params={"term": term, "l": language, "cc": cc},
                 timeout=15.0,
-                follow_redirects=True,
             )
             resp.raise_for_status()
             payload = resp.json()
@@ -1166,12 +1426,13 @@ class SteamClient:
         # 2) Fallback: store HTML search endpoint
         try:
             client = await self._get_http_client(store=True)
-            resp = await client.get(
+            resp = await self._request_same_origin(
+                client,
+                "GET",
                 f"{self.steam_store_base}/search/results/",
                 params={"term": term, "l": language, "cc": cc, "count": limit, "json": 1},
                 headers={"Accept": "application/json"},
                 timeout=15.0,
-                follow_redirects=True,
             )
             resp.raise_for_status()
             payload = resp.json()
@@ -1571,11 +1832,12 @@ class SteamClient:
             return None
         try:
             client = await self._get_http_client(store=False)
-            resp = await client.get(
+            resp = await self._request_same_origin(
+                client,
+                "GET",
                 f"{self.itad_api_base}/games/lookup/v1",
                 params={"appid": gid, "key": key},
                 timeout=15.0,
-                follow_redirects=True,
             )
             resp.raise_for_status()
             payload = resp.json()
@@ -1599,11 +1861,12 @@ class SteamClient:
             return []
         try:
             client = await self._get_http_client(store=False)
-            resp = await client.get(
+            resp = await self._request_same_origin(
+                client,
+                "GET",
                 f"{self.itad_api_base}/games/search/v1",
                 params={"title": term, "results": limit, "key": key},
                 timeout=15.0,
-                follow_redirects=True,
             )
             resp.raise_for_status()
             payload = resp.json()
@@ -1641,12 +1904,13 @@ class SteamClient:
         cc = str(country or "CN").strip().upper() or "CN"
         try:
             client = await self._get_http_client(store=False)
-            resp = await client.post(
+            resp = await self._request_same_origin(
+                client,
+                "POST",
                 f"{self.itad_api_base}/games/prices/v3",
                 json=[game_id],
                 params={"country": cc, "key": key},
                 timeout=20.0,
-                follow_redirects=True,
             )
             resp.raise_for_status()
             payload = resp.json()

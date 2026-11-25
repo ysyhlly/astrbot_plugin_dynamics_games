@@ -36,22 +36,17 @@ class GamesWebConsole:
             raise ValueError("请求体无效")
         return data
 
-    async def _require_admin(self) -> str:
-        from astrbot.dashboard.api.auth import require_dashboard_user
+    async def _require_admin(self, *, check_csrf: bool = False) -> str:
+        from ..series_panels import require_series_admin
 
-        raw = getattr(request, "_request", None)
-        if raw is None:
-            raise PermissionError("需要 Dashboard 管理员登录")
-        actor = await require_dashboard_user(raw)
-        expected = self.plugin.context.get_config().get("dashboard", {}).get("username")
-        if not actor or (expected and actor != expected):
-            raise PermissionError("需要 Dashboard 管理员登录")
-        return str(actor)
+        return await require_series_admin(
+            self.plugin.context, request, check_csrf=check_csrf
+        )
 
-    def _wrap(self, fn):
+    def _wrap(self, fn, *, check_csrf: bool = False):
         async def handler():
             try:
-                await self._require_admin()
+                await self._require_admin(check_csrf=check_csrf)
                 data = await fn()
                 return json_response({"status": "ok", "data": data})
             except PermissionError as exc:
@@ -74,6 +69,7 @@ class GamesWebConsole:
         return handler
 
     def register(self) -> None:
+        from ..series_panels import CSRF_PROTECTED_METHODS
         from ..series_workspace import register_panel_api
 
         endpoints = (
@@ -93,7 +89,10 @@ class GamesWebConsole:
             ("toggle_module", self.toggle_module, ["POST"], "启停内置娱乐引擎模块"),
         )
         for name, fn, methods, desc in endpoints:
-            wrapped = self._wrap(fn)
+            needs_csrf = any(
+                str(m).upper() in CSRF_PROTECTED_METHODS for m in methods
+            )
+            wrapped = self._wrap(fn, check_csrf=needs_csrf)
             route = f"/{PLUGIN_ID}/{name}"
             register_panel_api(self.plugin, self.plugin.context.register_web_api, route, wrapped, methods, desc)
             self._routes.append((route, wrapped, methods, desc))
