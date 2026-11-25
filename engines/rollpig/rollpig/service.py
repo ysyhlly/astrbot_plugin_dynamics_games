@@ -32,15 +32,28 @@ class RollPigService:
 
     def draw(self, user_id: str) -> Pig | None:
         """为用户抽取今日小猪；当天已抽过则直接返回原结果，资源为空时返回 ``None``。"""
-        board = self._store.load(self._clock().isoformat())
+        day = self._clock().isoformat()
 
+        def _draw_on_board(board):
+            cached = board.get(user_id)
+            if cached is not None:
+                return cached
+            if not self._repository:
+                return None
+            pig = self._chooser(self._repository.pigs)
+            board.put(user_id, pig)
+            return pig
+
+        update_fn = getattr(self._store, "update", None)
+        if callable(update_fn):
+            return update_fn(day, _draw_on_board)
+
+        board = self._store.load(day)
         cached = board.get(user_id)
         if cached is not None:
             return cached
-
         if not self._repository:
             return None
-
         pig = self._chooser(self._repository.pigs)
         board.put(user_id, pig)
         self._store.save(board)

@@ -542,65 +542,28 @@ class ActivityCoordinator:
             return None
         umo = resolved_umo
 
-        if dedup_key:
-            existing = await asyncio.to_thread(
-                self.store.list_outcomes, umo=umo, limit=50
-            )
-            for row in existing:
-                if str(row.get("title") or "") == title and int(
-                    row.get("contribution_count") or 0
-                ) == max(1, len(extra_contributions or []) or 1):
-                    return row
-
-        creator = (
-            participants[0] if participants else {"uid": "system", "name": "群成员"}
-        )
-        act = await asyncio.to_thread(
-            self.store.create_activity,
+        outcome, created = await asyncio.to_thread(
+            self.store.record_minigame_outcome_atomic,
             umo=umo,
             group_id=group_id or umo.rsplit(":", 1)[-1],
-            category=category,
+            game_key=game_key,
             title=title,
-            description=f"内置引擎 {game_key} 完赛/导出成果记录",
-            creator_uid=str(creator.get("uid") or "system"),
-            creator_name=str(creator.get("name") or "群成员"),
-            target_count=max(1, int(rounds)),
-            min_participants=1,
-            initial_status="active",
+            rounds=rounds,
+            participants=participants,
+            summary=summary,
+            category=category,
+            extra_contributions=extra_contributions,
+            dedup_key=dedup_key,
+            min_chronicle_participants=self.min_chronicle_participants(),
+            min_chronicle_contributions=self.min_chronicle_contributions(),
         )
-        for p in participants[1:]:
-            await asyncio.to_thread(
-                self.store.join_activity,
-                act["id"],
-                str(p.get("uid") or ""),
-                str(p.get("name") or p.get("uid") or ""),
+        if created and outcome is not None:
+            await self.sync_outcome_records(outcome["activity_id"])
+            refreshed = await asyncio.to_thread(
+                self.store.get_outcome, outcome["activity_id"]
             )
-        if extra_contributions:
-            for item in extra_contributions[:50]:
-                await asyncio.to_thread(
-                    self.store.add_contribution,
-                    act["id"],
-                    uid=str(item.get("uid") or creator.get("uid") or "system"),
-                    name=str(item.get("name") or creator.get("name") or "群成员"),
-                    content=str(item.get("content") or "")[:1200],
-                    kind=str(item.get("kind") or "work"),
-                )
-        else:
-            await asyncio.to_thread(
-                self.store.add_contribution,
-                act["id"],
-                uid=str(creator.get("uid") or "system"),
-                name=str(creator.get("name") or "群成员"),
-                content=summary[:1200],
-                kind="game_round",
-            )
-        _, _, outcome = await self.complete_activity(
-            umo=umo,
-            actor_uid=str(creator.get("uid") or "system"),
-            is_admin=True,
-            activity_id=act["id"],
-            closing_note=summary[:400],
-        )
+            if refreshed is not None:
+                outcome = refreshed
         return outcome
 
     def companion_health(self) -> dict[str, Any]:

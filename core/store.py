@@ -143,6 +143,13 @@ class ActivityStore:
                     snapshot_json TEXT NOT NULL,
                     occurred_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS minigame_dedup (
+                    umo TEXT NOT NULL,
+                    dedup_key TEXT NOT NULL,
+                    activity_id TEXT NOT NULL UNIQUE REFERENCES outcomes(activity_id),
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY(umo, dedup_key)
+                );
                 PRAGMA user_version = 1;
                 """
             )
@@ -1042,6 +1049,233 @@ class ActivityStore:
             )
             db.execute("DELETE FROM truth_room_handoffs WHERE room_id=?", (room_id,))
             return aid
+
+    @staticmethod
+    def _hydrate_outcome_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        data = dict(row)
+        data["valuable"] = bool(data.get("valuable"))
+        data["participants"] = json.loads(
+            data.pop("participants_json", "[]") or "[]"
+        )
+        data["stats"] = json.loads(data.pop("stats_json", "{}") or "{}")
+        cat = CATEGORIES.get(data["category"], CATEGORIES["creation"])
+        data["category_label"] = cat["label"]
+        data["category_icon"] = cat["icon"]
+        return data
+
+    def record_minigame_outcome_atomic(
+        self,
+        *,
+        umo: str,
+        group_id: str,
+        game_key: str,
+        title: str,
+        rounds: int,
+        participants: list[dict[str, Any]],
+        summary: str,
+        category: str = "mini_game",
+        extra_contributions: list[dict[str, Any]] | None = None,
+        dedup_key: str = "",
+        min_chronicle_participants: int = 2,
+        min_chronicle_contributions: int = 1,
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically archive a mini-game outcome in a single SQLite write transaction.
+
+        Executes dedup check, activity creation, participant joins, contribution
+        inserts, completion/outcome persistence, and dedup key registration within
+        one ``BEGIN IMMEDIATE`` transaction so mid-flight errors roll back completely
+        with zero orphan ``active`` activities or partial contributions.
+
+        Returns:
+            ``(outcome_dict, created)`` where ``created`` is ``False`` on dedup hit.
+        """
+        clean_dedup = str(dedup_key or "").strip()[:240]
+        clean_summary = str(summary or "")
+        expected_contribs = max(
+            1,
+            len(
+                [
+                    c
+                    for c in (extra_contributions or [])[:50]
+                    if str(c.get("content") or "").strip()
+                ]
+            )
+            or 1,
+        )
+        now = time.time()
+        with self.connection(write=True) as db:
+            if clean_dedup:
+                prior = db.execute(
+                    "SELECT activity_id FROM minigame_dedup WHERE umo=? AND dedup_key=?",
+                    (umo, clean_dedup),
+                ).fetchone()
+                if prior is not None:
+                    row = db.execute(
+                        "SELECT * FROM outcomes WHERE activity_id=?",
+                        (prior["activity_id"],),
+                    ).fetchone()
+                    hydrated = self._hydrate_outcome_row(row)
+                    if hydrated is not None:
+                        return hydrated, False
+                # Backward-compatible dedup check for pre-migration outcomes
+                legacy_rows = db.execute(
+                    "SELECT * FROM outcomes WHERE umo=? AND title=? ORDER BY created_at DESC, activity_id DESC LIMIT 50",
+                    (umo, str(title or "")[:120]),
+                ).fetchall()
+                for row in legacy_rows:
+                    hydrated = self._hydrate_outcome_row(row)
+                    if hydrated is not None and int(
+                        (hydrated.get("stats") or {}).get("contribution_count") or 0
+                    ) == expected_contribs:
+                        return hydrated, False
+
+            creator = (
+                participants[0]
+                if participants
+                else {"uid": "system", "name": "群成员"}
+            )
+            creator_uid = str(creator.get("uid") or "system")
+            creator_name = str(creator.get("name") or "群成员")
+            max_people = max(30, len(participants) + 1)
+            act = self.create_activity(
+                umo=umo,
+                group_id=group_id or umo.rsplit(":", 1)[-1],
+                category=category,
+                title=title,
+                description=f"内置引擎 {game_key} 完赛/导出成果记录",
+                creator_uid=creator_uid,
+                creator_name=creator_name,
+                target_count=max(1, int(rounds)),
+                min_participants=1,
+                max_participants=max_people,
+                created_at=now,
+                initial_status="active",
+                _connection=db,
+            )
+            aid = act["id"]
+
+            seen_uids = {creator_uid}
+            for p in participants[1:]:
+                p_uid = str(p.get("uid") or "").strip()
+                if not p_uid or p_uid in seen_uids:
+                    continue
+                seen_uids.add(p_uid)
+                p_name = str(p.get("name") or p_uid)
+                ok, msg, _ = self.join_activity(aid, p_uid, p_name, _connection=db)
+                if not ok:
+                    raise ValueError(msg)
+
+            added_any = False
+            if extra_contributions:
+                for item in extra_contributions[:50]:
+                    item_content = str(item.get("content") or "")[:1200]
+                    if not item_content.strip():
+                        continue
+                    ok, msg, updated_act, _ = self.add_contribution(
+                        aid,
+                        uid=str(item.get("uid") or creator_uid),
+                        name=str(item.get("name") or creator_name),
+                        content=item_content,
+                        kind=str(item.get("kind") or "work"),
+                        _connection=db,
+                    )
+                    if not ok or updated_act is None:
+                        raise ValueError(msg)
+                    act = updated_act
+                    added_any = True
+
+            if not added_any:
+                fallback_content = clean_summary[:1200].strip() or f"{title} 完赛记录"
+                ok, msg, updated_act, _ = self.add_contribution(
+                    aid,
+                    uid=creator_uid,
+                    name=creator_name,
+                    content=fallback_content,
+                    kind="game_round",
+                    _connection=db,
+                )
+                if not ok or updated_act is None:
+                    raise ValueError(msg)
+                act = updated_act
+
+            participant_rows = [
+                dict(r)
+                for r in db.execute(
+                    "SELECT * FROM participants WHERE activity_id=? ORDER BY rowid",
+                    (aid,),
+                )
+            ]
+            contribution_rows = [
+                dict(r)
+                for r in db.execute(
+                    "SELECT * FROM contributions WHERE activity_id=? ORDER BY id",
+                    (aid,),
+                )
+            ]
+            joined = [
+                p for p in participant_rows if p.get("status", "joined") == "joined"
+            ]
+            valuable, worthiness_reason, importance = evaluate_outcome_worthiness(
+                {**act, "status": "completed"},
+                participant_rows,
+                contribution_rows,
+                min_participants=min_chronicle_participants,
+                min_contributions=min_chronicle_contributions,
+            )
+            closing_note = clean_summary[:400]
+            artifact_md = build_artifact_markdown(
+                act, participant_rows, contribution_rows, closing_note=closing_note
+            )
+            cat = CATEGORIES.get(act["category"], CATEGORIES["creation"])
+            member_names = "、".join(p["name"] for p in joined[:12])
+            excerpts = "；".join(
+                f"{c['name']}：{str(c['content']).strip()[:80]}"
+                for c in contribution_rows[:6]
+            )
+            summary_parts = [
+                f"群友共同完成{cat['label']}《{act['title']}》（编号 {act['id']}），共 {len(joined)} 人参与（{member_names}），历经 {len(act['stages'])} 个阶段、累计 {len(contribution_rows)} 条推进记录。"
+            ]
+            if closing_note.strip():
+                summary_parts.append(f"结项总结：{closing_note.strip()[:300]}")
+            elif excerpts:
+                summary_parts.append(f"内容节选：{excerpts[:450]}")
+            outcome_summary = " ".join(summary_parts)
+            stats = {
+                "participant_count": len(joined),
+                "contribution_count": len(contribution_rows),
+                "stages_total": len(act["stages"]),
+            }
+            if not self.save_completion(
+                aid,
+                expected_revision=act["revision"],
+                closing_note=closing_note,
+                summary=outcome_summary,
+                artifact_markdown=artifact_md,
+                valuable=valuable,
+                worthiness_reason=worthiness_reason,
+                importance=importance,
+                participants_snapshot=joined,
+                stats=stats,
+                completed_at=now,
+                _connection=db,
+            ):
+                raise RuntimeError("小游戏成果原子归档失败")
+
+            if clean_dedup:
+                db.execute(
+                    "INSERT INTO minigame_dedup(umo, dedup_key, activity_id, created_at) VALUES (?, ?, ?, ?)",
+                    (umo, clean_dedup, aid, now),
+                )
+
+            outcome_row = db.execute(
+                "SELECT * FROM outcomes WHERE activity_id=?", (aid,)
+            ).fetchone()
+            hydrated = self._hydrate_outcome_row(outcome_row)
+            if hydrated is None:
+                raise RuntimeError("小游戏成果归档后回读失败")
+            return hydrated, True
 
     def pending_outcome_syncs(
         self,
