@@ -13,7 +13,7 @@ ensure_current(
         ("core.coordinator", "ActivityCoordinator", "sync_outcome_records"),
         ("core.store", "ActivityStore", "save_completion"),
     ],
-    version="0.1.2-rc.2",
+    version="0.1.2",
 )
 
 import asyncio
@@ -87,7 +87,7 @@ LEGACY_ENGINE_PLUGIN_MAP: dict[str, str] = {
 class DynamicsGamesPlugin(Star):
     """群间游戏：组织共读、游戏约局、接龙创作、小型挑战、共同制作作品与群聊娱乐引擎总成。"""
 
-    VERSION = "0.1.2-rc.2"
+    VERSION = "0.1.2"
     name = PLUGIN_ID
     author = "ysyhlly"
     plugin_id = f"ysyhlly/{PLUGIN_ID}"

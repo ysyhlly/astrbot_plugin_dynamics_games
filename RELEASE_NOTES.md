@@ -1,4 +1,8 @@
-# astrbot_plugin_dynamics_games v0.1.2-rc.2
+# astrbot_plugin_dynamics_games v0.1.2
+
+## v0.1.2 — 2026-11-26
+
+- **正式版发布（GA）**：整合全部 `v0.1.2-rc.x` 安全鉴权与 SSRF 加固、存储与热点 I/O 优化、Steam 监控与真心话 P0 修复及系列共享资产同步。
 
 ## v0.1.2-rc.2 — 2026-11-25
 
