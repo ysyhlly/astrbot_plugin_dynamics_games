@@ -5,9 +5,10 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any
 
 from .state_machine import ActiveSession
 

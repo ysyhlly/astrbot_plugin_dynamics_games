@@ -6,8 +6,9 @@ import asyncio
 import re
 import time
 import unicodedata
+from collections.abc import Awaitable, Callable
 from html import unescape
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from astrbot.api import logger
 

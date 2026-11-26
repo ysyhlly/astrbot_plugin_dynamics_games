@@ -12,14 +12,16 @@ import os
 import re
 import ssl
 import time
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any
 from urllib.parse import urlsplit
 
 from astrbot.api import logger
 
 from ...runtime import PLUGIN_ID, Component
+
 try:
     from ... import series_panels
 except Exception:  # pragma: no cover - standalone fallback

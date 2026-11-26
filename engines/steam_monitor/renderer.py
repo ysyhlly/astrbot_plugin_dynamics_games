@@ -7,12 +7,14 @@ import inspect
 import os
 import tempfile
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from astrbot.api import logger
-from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .steam_client import sanitize_avatar_frame_url, sanitize_render_image_url
 

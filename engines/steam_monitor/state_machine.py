@@ -5,9 +5,10 @@ Zero I/O: all functions are deterministic given explicit timestamps and timezone
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, tzinfo
-from typing import Any, Iterable, Literal, Mapping
+from typing import Any, Literal
 
 SessionState = Literal["playing", "confirming_exit"]
 EventKind = Literal["started", "closed", "fluctuation"]

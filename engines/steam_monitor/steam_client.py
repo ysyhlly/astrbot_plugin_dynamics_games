@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 import inspect
 import ipaddress
 import json
@@ -11,12 +10,15 @@ import os
 import re
 import ssl
 import time
+from collections import deque
+from collections.abc import Callable
 from html import unescape
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 import httpx
+
 from astrbot.api import logger
 
 STEAM_ID64_OFFSET = 76561197960265728
@@ -257,7 +259,7 @@ def _parse_steam_search_html(html: str, limit: int) -> list[dict[str, Any]]:
         re.IGNORECASE,
     )
     element_pattern = re.compile(
-        r'<(?P<tag>[a-z][a-z0-9]*)\b(?P<attrs>[^>]*)>(?P<body>[\s\S]*?)</(?P=tag)>',
+        r"<(?P<tag>[a-z][a-z0-9]*)\b(?P<attrs>[^>]*)>(?P<body>[\s\S]*?)</(?P=tag)>",
         re.IGNORECASE,
     )
     image_pattern = re.compile(r'<img\b[^>]*\bsrc=["\']([^"\']+)["\']', re.IGNORECASE)
