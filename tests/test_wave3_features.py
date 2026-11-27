@@ -406,3 +406,29 @@ def test_multimodal_engine_architecture_and_help_text():
 
     help_txt = build_help_text()
     assert "/传话筒" in help_txt and "/你画我猜" in help_txt
+
+
+def test_conf_schema_objects_have_items_for_astrbot_config_parser():
+    """Ensure every type='object' node in _conf_schema.json defines 'items' (AstrBot v4.29+ requirement)."""
+    import json
+
+    schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+
+    def _walk(node: dict, path: str = "") -> dict:
+        defaults: dict = {}
+        for key, spec in node.items():
+            assert isinstance(spec, dict), f"Schema node {path}{key} must be a dict"
+            cur_path = f"{path}{key}"
+            if spec.get("type") == "object":
+                assert "items" in spec and isinstance(spec["items"], dict), (
+                    f"Schema object {cur_path!r} is missing dict 'items' required by AstrBotConfig"
+                )
+                defaults[key] = _walk(spec["items"], path=f"{cur_path}.")
+            else:
+                defaults[key] = spec.get("default")
+        return defaults
+
+    parsed = _walk(schema)
+    assert "modules" in parsed
+    assert "per_group_modules" in parsed["modules"]
+    assert parsed["modules"]["per_group_modules"] == {}
