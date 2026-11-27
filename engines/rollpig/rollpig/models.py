@@ -38,17 +38,35 @@ class Pig:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class DrawOutcome:
+    """一次抽取的完整结果（含个人图鉴收集进度与同群撞猪彩蛋）。"""
+
+    pig: Pig
+    is_new_unlock: bool = False
+    collected_count: int = 0
+    total_count: int = 0
+    collision_peers: tuple[str, ...] = ()
+
+
 @dataclass(slots=True)
 class DailyBoard:
-    """某一天的抽取记录（用户 ID → 小猪）。"""
+    """某一天的抽取记录（用户 ID → 小猪）及个人图鉴收集/同群撞猪索引。"""
 
     day: str
     records: dict[str, Pig] = field(default_factory=dict)
+    group_draws: dict[str, dict[str, dict[str, str]]] = field(default_factory=dict)
+    collections: dict[str, list[str]] = field(default_factory=dict)
 
     @classmethod
-    def empty(cls, day: str) -> DailyBoard:
-        """构造某一天的空记录板。"""
-        return cls(day=day)
+    def empty(cls, day: str, *, collections: dict[str, list[str]] | None = None) -> DailyBoard:
+        """构造某一天的空记录板（可跨日延续个人图鉴收集记录）。"""
+        copied = {
+            str(uid): list(dict.fromkeys(str(pid) for pid in pids if pid))
+            for uid, pids in (collections or {}).items()
+            if uid
+        }
+        return cls(day=day, collections=copied)
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any], day: str) -> DailyBoard:
@@ -59,14 +77,45 @@ class DailyBoard:
             for user_id, record in stored.items():
                 if isinstance(record, Mapping):
                     records[str(user_id)] = Pig.from_mapping(record)
-        return cls(day=day, records=records)
+        group_draws: dict[str, dict[str, dict[str, str]]] = {}
+        raw_gd = raw.get("group_draws")
+        if isinstance(raw_gd, Mapping):
+            for gid, users in raw_gd.items():
+                if isinstance(users, Mapping):
+                    group_draws[str(gid)] = {
+                        str(uid): {
+                            "pig_id": str(info.get("pig_id") or ""),
+                            "name": str(info.get("name") or uid),
+                        }
+                        for uid, info in users.items()
+                        if isinstance(info, Mapping) and info.get("pig_id")
+                    }
+        collections: dict[str, list[str]] = {}
+        raw_col = raw.get("collections")
+        if isinstance(raw_col, Mapping):
+            for uid, pids in raw_col.items():
+                if isinstance(pids, list):
+                    collections[str(uid)] = list(
+                        dict.fromkeys(str(p) for p in pids if p)
+                    )
+        return cls(
+            day=day,
+            records=records,
+            group_draws=group_draws,
+            collections=collections,
+        )
 
     def to_mapping(self) -> dict[str, Any]:
         """序列化为持久化结构。"""
-        return {
+        out: dict[str, Any] = {
             "date": self.day,
             "records": {user_id: pig.to_mapping() for user_id, pig in self.records.items()},
         }
+        if self.group_draws:
+            out["group_draws"] = self.group_draws
+        if self.collections:
+            out["collections"] = self.collections
+        return out
 
     def get(self, user_id: str) -> Pig | None:
         """读取用户当天已抽到的小猪。"""

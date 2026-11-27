@@ -6,7 +6,7 @@ import random
 from collections.abc import Callable, Sequence
 from datetime import date
 
-from .models import Pig
+from .models import DrawOutcome, Pig
 from .repository import PigRepository
 from .storage import BoardStore
 
@@ -32,29 +32,61 @@ class RollPigService:
 
     def draw(self, user_id: str) -> Pig | None:
         """为用户抽取今日小猪；当天已抽过则直接返回原结果，资源为空时返回 ``None``。"""
-        day = self._clock().isoformat()
+        outcome = self.draw_with_social_info(user_id)
+        return outcome.pig if outcome is not None else None
 
-        def _draw_on_board(board):
-            cached = board.get(user_id)
-            if cached is not None:
-                return cached
-            if not self._repository:
-                return None
-            pig = self._chooser(self._repository.pigs)
-            board.put(user_id, pig)
-            return pig
+    def draw_with_social_info(
+        self,
+        user_id: str,
+        *,
+        group_id: str = "",
+        user_name: str = "",
+    ) -> DrawOutcome | None:
+        """抽取今日小猪并返回图鉴收集进度与同群撞猪彩蛋名单。"""
+        day = self._clock().isoformat()
+        uid = str(user_id or "").strip()
+        gid = str(group_id or "").strip()
+        uname = str(user_name or "").strip() or uid
+        total = len(self._repository.pigs) if self._repository else 0
+
+        def _draw_on_board(board) -> DrawOutcome | None:
+            pig = board.get(uid)
+            if pig is None:
+                if not self._repository:
+                    return None
+                pig = self._chooser(self._repository.pigs)
+                board.put(uid, pig)
+
+            # Personal collection progress
+            col = board.collections.setdefault(uid, [])
+            is_new = False
+            if pig.id and pig.id not in col:
+                col.append(pig.id)
+                is_new = True
+
+            # Same-group same-day pig collision detection
+            peers: list[str] = []
+            if gid and pig.id:
+                gd = board.group_draws.setdefault(gid, {})
+                for other_uid, info in gd.items():
+                    if other_uid != uid and str(info.get("pig_id") or "") == pig.id:
+                        peers.append(str(info.get("name") or other_uid))
+                gd[uid] = {"pig_id": pig.id, "name": uname}
+
+            return DrawOutcome(
+                pig=pig,
+                is_new_unlock=is_new,
+                collected_count=len(col),
+                total_count=max(total, len(col)),
+                collision_peers=tuple(peers),
+            )
 
         update_fn = getattr(self._store, "update", None)
         if callable(update_fn):
             return update_fn(day, _draw_on_board)
 
         board = self._store.load(day)
-        cached = board.get(user_id)
-        if cached is not None:
-            return cached
-        if not self._repository:
-            return None
-        pig = self._chooser(self._repository.pigs)
-        board.put(user_id, pig)
-        self._store.save(board)
-        return pig
+        outcome = _draw_on_board(board)
+        if outcome is not None:
+            self._store.save(board)
+        return outcome

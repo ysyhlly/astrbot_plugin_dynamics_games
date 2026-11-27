@@ -4,30 +4,48 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
 
+from .. import series_panels
 from ..bridges.chronicle_bridge import chronicle_status, sync_outcome_to_chronicle
 from ..bridges.memory_bridge import memory_status, sync_experience_to_memory
+from ..bridges.social_bridge import emit_entertainment_signal
+from ..bridges.visual_bridge import generate_artwork_via_visual_media, visual_status
 from .models import (
     CATEGORIES,
     build_artifact_markdown,
     evaluate_outcome_worthiness,
     resolve_category,
 )
+from .poster import render_activity_poster, render_relay_illustration_card
 from .store import ActivityStore, check_activity_revision
+
+CHALLENGE_SOFT_PENALTIES: tuple[str, ...] = (
+    "发一句真诚检讨 + 一个委屈表情包",
+    "群内夸奖本期打卡最多的冠军一句彩虹屁",
+    "立下一个明日 5 分钟微目标并拍照打卡",
+    "在群里安利一首好歌作为迟到补偿",
+)
 
 
 class ActivityCoordinator:
     """Orchestrate collaborative group activities and ecosystem archiving."""
 
     def __init__(
-        self, store: ActivityStore, context: Any, config: dict[str, Any]
+        self,
+        store: ActivityStore,
+        context: Any,
+        config: dict[str, Any],
+        *,
+        plugin: Any = None,
     ) -> None:
         self.store = store
         self.context = context
         self.config = config
+        self.plugin = plugin
         self._syncing_outcomes: set[str] = set()
         self.truth_outcome_ready = asyncio.Event()
 
@@ -58,6 +76,19 @@ class ActivityCoordinator:
         hours = float(self._act_cfg().get("stale_expire_hours", 168) or 0)
         return max(0.0, hours * 3600.0)
 
+    def stale_reminder_seconds(self) -> float:
+        hours = float(self._act_cfg().get("stale_reminder_hours", 24) or 0)
+        return max(0.0, hours * 3600.0)
+
+    def poster_on_complete(self) -> bool:
+        return bool(self._act_cfg().get("poster_on_complete", True))
+
+    def relay_illustration_interval(self) -> int:
+        try:
+            return max(0, int(self._act_cfg().get("relay_illustration_interval", 3) or 0))
+        except (TypeError, ValueError):
+            return 3
+
     async def cleanup_stale_activities(
         self, *, umo: str = "", max_age_seconds: float | None = None
     ) -> list[dict[str, Any]]:
@@ -67,6 +98,242 @@ class ActivityCoordinator:
         return await asyncio.to_thread(
             self.store.expire_stale_activities, max_age_seconds=age, umo=umo
         )
+
+    async def check_and_send_stale_reminders(
+        self,
+        *,
+        umo: str = "",
+        send_fn: Any = None,
+        now: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Send one-time 24h pre-expiry reminders for stale activities, respecting quiet_hours."""
+        expire_sec = self.stale_expire_seconds()
+        lead_sec = self.stale_reminder_seconds()
+        if expire_sec <= 0 or lead_sec <= 0:
+            return []
+        if series_panels.is_series_in_quiet_hours(self.context):
+            return []
+        due = await asyncio.to_thread(
+            self.store.list_activities_needing_reminder,
+            stale_expire_seconds=expire_sec,
+            reminder_lead_seconds=lead_sec,
+            umo=umo,
+            now=now,
+        )
+        reminded: list[dict[str, Any]] = []
+        for act in due:
+            target_umo = str(act.get("umo") or "").strip()
+            if not target_umo:
+                continue
+            if series_panels.is_series_group_excluded(self.context, umo=target_umo):
+                continue
+            if self.plugin is not None and callable(getattr(self.plugin, "_is_scope_disabled", None)):
+                if self.plugin._is_scope_disabled(target_umo):
+                    continue
+            remain_hours = max(
+                1,
+                int(
+                    round(
+                        max(
+                            0.0,
+                            expire_sec
+                            - ((time.time() if now is None else float(now)) - float(act.get("updated_at") or 0)),
+                        )
+                        / 3600.0
+                    )
+                ),
+            )
+            text = (
+                f"⏰ 活动临期提醒：{act['category_icon']}【{act['category_label']}】《{act['title']}》[{act['id']}] "
+                f"已有一段时间未推进，距超时流局清理约剩 {remain_hours} 小时。\n"
+                f"· 发送 `/活动 打卡 {act['id']} <内容>` 可续期推进\n"
+                f"· 发送 `/活动 完结 {act['id']}` 定稿结项，或 `/活动 取消 {act['id']}` 手动结束"
+            )
+            sent = False
+            try:
+                if callable(send_fn):
+                    res = send_fn(target_umo, text)
+                    if asyncio.iscoroutine(res):
+                        await res
+                    sent = True
+                elif callable(getattr(self.context, "send_message", None)):
+                    from astrbot.api.event import MessageChain
+
+                    await self.context.send_message(
+                        target_umo, MessageChain().message(text)
+                    )
+                    sent = True
+            except Exception as exc:
+                logger.warning("发送活动临期提醒失败 id=%s err=%s", act["id"], exc)
+            if sent:
+                await asyncio.to_thread(
+                    self.store.mark_stale_reminded, act["id"], now=now
+                )
+                reminded.append(act)
+        return reminded
+
+    async def generate_activity_poster(
+        self,
+        activity_id: str,
+        *,
+        umo: str = "",
+        output_dir: Path | None = None,
+    ) -> dict[str, Any]:
+        """Generate a shareable activity poster (Visual Media artwork + Pillow fallback)."""
+        act = await asyncio.to_thread(
+            self.store.get_activity, activity_id, umo=umo or None
+        )
+        if act is None:
+            return {"ok": False, "image_path": "", "error": "未找到该活动", "activity": None}
+        participants = await asyncio.to_thread(
+            self.store.get_participants, act["id"]
+        )
+        contributions = await asyncio.to_thread(
+            self.store.get_contributions, act["id"], 120
+        )
+        outcome = await asyncio.to_thread(self.store.get_outcome, act["id"])
+
+        excerpts = "；".join(
+            str(c.get("content") or "").strip()[:48] for c in contributions[-3:]
+        )
+        prompt = (
+            f"为群友共同参与的{act['category_label']}《{act['title']}》绘制一张温暖精致的纪念封面插画。"
+            + (f"主题说明：{str(act.get('description') or '')[:100]}。" if act.get("description") else "")
+            + (f"精彩片段：{excerpts}" if excerpts else "")
+        )
+        art_res = await generate_artwork_via_visual_media(
+            self.context,
+            prompt,
+            umo=act["umo"],
+            style="editorial_poster",
+            source_plugin="astrbot_plugin_dynamics_games",
+        )
+        cover_path = art_res.get("image_path", "") if art_res.get("ok") else ""
+        try:
+            poster_path = await asyncio.to_thread(
+                render_activity_poster,
+                act,
+                participants,
+                contributions,
+                outcome=outcome,
+                cover_image_path=cover_path,
+                output_dir=output_dir,
+            )
+            if outcome is not None:
+                await asyncio.to_thread(
+                    self.store.update_outcome_poster, act["id"], str(poster_path)
+                )
+            return {
+                "ok": True,
+                "image_path": str(poster_path),
+                "artwork_source": "visual_media" if cover_path else "pillow_fallback",
+                "activity": act,
+                "error": "",
+            }
+        except Exception as exc:
+            logger.warning("生成活动画报失败 id=%s err=%s", act["id"], exc)
+            return {
+                "ok": False,
+                "image_path": "",
+                "artwork_source": "error",
+                "activity": act,
+                "error": str(exc)[:200],
+            }
+
+    async def maybe_generate_relay_illustration(
+        self,
+        act: dict[str, Any],
+        total_turns: int,
+        author_name: str,
+        content: str,
+        *,
+        output_dir: Path | None = None,
+    ) -> dict[str, Any] | None:
+        """Auto-illustrate every Nth turn of a story relay (Visual Media + Pillow comic card)."""
+        if act.get("category") != "relay":
+            return None
+        interval = self.relay_illustration_interval()
+        if interval <= 0 or total_turns <= 0 or total_turns % interval != 0:
+            return None
+        prompt = (
+            f"故事接龙《{act['title']}》第 {total_turns} 棒分镜插画（绘本连环画风格）："
+            f"{str(content or '').strip()[:160]}"
+        )
+        art_res = await generate_artwork_via_visual_media(
+            self.context,
+            prompt,
+            umo=act["umo"],
+            style="comic_panel",
+            source_plugin="astrbot_plugin_dynamics_games",
+        )
+        art_path = art_res.get("image_path", "") if art_res.get("ok") else ""
+        try:
+            card_path = await asyncio.to_thread(
+                render_relay_illustration_card,
+                act,
+                total_turns,
+                author_name,
+                content,
+                artwork_path=art_path,
+                output_dir=output_dir,
+            )
+            return {
+                "image_path": str(card_path),
+                "artwork_source": "visual_media" if art_path else "pillow_fallback",
+                "turn": total_turns,
+            }
+        except Exception as exc:
+            logger.warning("生成接龙连环画插画失败 id=%s err=%s", act.get("id"), exc)
+            return None
+
+    def _get_steam_engine(self) -> Any | None:
+        if self.plugin is None:
+            return None
+        engines = getattr(self.plugin, "engines", None)
+        if not isinstance(engines, dict):
+            return None
+        if callable(getattr(self.plugin, "module_enabled", None)) and not self.plugin.module_enabled("steam_monitor"):
+            return None
+        return engines.get("steam_monitor")
+
+    async def find_steam_coop_players(
+        self, umo: str, group_id: str, game_query: str = ""
+    ) -> dict[str, Any]:
+        """Query Steam Monitor for online/recent players matching a matchmaking game."""
+        eng = self._get_steam_engine()
+        if eng is None:
+            return {"available": False, "playing_now": [], "recent_players": [], "coop_groups": {}}
+        finder = getattr(eng, "get_group_coop_candidates", None)
+        if not callable(finder):
+            return {"available": False, "playing_now": [], "recent_players": [], "coop_groups": {}}
+        try:
+            res = await asyncio.to_thread(finder, group_id, game_query)
+            return res if isinstance(res, dict) else {"available": False}
+        except Exception as exc:
+            logger.debug("查询 Steam 开黑同好失败: %s", exc)
+            return {"available": False, "playing_now": [], "recent_players": [], "coop_groups": {}}
+
+    async def collect_steam_battle_report(self, act: dict[str, Any]) -> dict[str, Any] | None:
+        """Build a post-match Steam battle report for a completed matchmaking activity."""
+        if act.get("category") != "matchmaking":
+            return None
+        eng = self._get_steam_engine()
+        if eng is None:
+            return None
+        builder = getattr(eng, "build_party_battle_report", None)
+        if not callable(builder):
+            return None
+        gid = str(act.get("group_id") or "")
+        since_ts = max(0.0, float(act.get("created_at") or 0.0) - 1800.0)
+        try:
+            report = await asyncio.to_thread(
+                builder, gid, str(act.get("title") or ""), since_ts=since_ts
+            )
+            if isinstance(report, dict) and report.get("has_data"):
+                return report
+        except Exception as exc:
+            logger.debug("生成 Steam 局后战报失败: %s", exc)
+        return None
 
     async def enqueue_truth_outcome(self, snapshot: dict[str, Any]) -> None:
         await asyncio.to_thread(self.store.enqueue_truth_room, snapshot)
@@ -98,6 +365,7 @@ class ActivityCoordinator:
                 await self.flush_truth_outcomes()
                 mono = time.monotonic()
                 if mono - last_stale_check >= 1800.0:
+                    await self.check_and_send_stale_reminders()
                     await self.cleanup_stale_activities()
                     last_stale_check = mono
             except Exception:
@@ -227,7 +495,11 @@ class ActivityCoordinator:
         message_id: str = "",
     ) -> tuple[bool, str, dict[str, Any] | None, int]:
         target = await asyncio.to_thread(
-            self.store.resolve_active_activity, umo, activity_id, category_hint
+            self.store.resolve_active_activity,
+            umo,
+            activity_id,
+            category_hint,
+            preferred_uid=uid,
         )
         if target is None:
             hint_label = CATEGORIES.get(category_hint, {}).get("label", "协作活动")
@@ -246,6 +518,69 @@ class ActivityCoordinator:
             kind=kind,
             message_id=message_id,
             auto_join=True,
+        )
+
+    async def withdraw_contribution(
+        self,
+        *,
+        umo: str,
+        uid: str,
+        activity_id: str = "",
+        is_admin: bool = False,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        return await asyncio.to_thread(
+            self.store.withdraw_last_contribution,
+            umo,
+            uid,
+            activity_id=activity_id,
+            is_admin=is_admin,
+        )
+
+    async def rebind_contribution(
+        self,
+        *,
+        umo: str,
+        uid: str,
+        target_activity_id: str,
+        is_admin: bool = False,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        return await asyncio.to_thread(
+            self.store.rebind_contribution,
+            umo,
+            uid,
+            target_activity_id,
+            is_admin=is_admin,
+        )
+
+    async def transfer_creator(
+        self,
+        *,
+        umo: str,
+        actor_uid: str,
+        is_admin: bool,
+        new_creator_uid: str,
+        new_creator_name: str = "",
+        activity_id: str = "",
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        target = await asyncio.to_thread(
+            self.store.resolve_active_activity,
+            umo,
+            activity_id,
+            preferred_uid=actor_uid,
+        )
+        if target is None:
+            return False, "未找到可移交的进行中活动。", None
+        if not is_admin and str(actor_uid) != str(target["creator_uid"]):
+            return (
+                False,
+                f"仅当前发起人（{target['creator_name']}）或群管理员可移交发起人。",
+                target,
+            )
+        return await asyncio.to_thread(
+            self.store.transfer_creator,
+            target["id"],
+            new_creator_uid=new_creator_uid,
+            new_creator_name=new_creator_name,
         )
 
     async def complete_activity(
@@ -275,13 +610,63 @@ class ActivityCoordinator:
             )
 
         aid = target["id"]
+        effective_note = str(closing_note or "").strip()
+        steam_report = await self.collect_steam_battle_report(target)
+        if steam_report and steam_report.get("summary"):
+            effective_note = (
+                f"{effective_note}\n{steam_report['summary']}".strip()
+                if effective_note
+                else str(steam_report["summary"])
+            )
+        if target.get("category") == "challenge":
+            parts_now = await asyncio.to_thread(self.store.get_participants, aid)
+            missed = [
+                p
+                for p in parts_now
+                if p.get("status", "joined") == "joined"
+                and int(p.get("contribution_count") or 0) <= 0
+            ]
+            if missed:
+                names = "、".join(str(p.get("name") or p.get("uid")) for p in missed[:8])
+                dare = CHALLENGE_SOFT_PENALTIES[len(missed) % len(CHALLENGE_SOFT_PENALTIES)]
+                soft_line = f"趣味软惩罚（未打卡成员：{names}）：{dare}"
+                effective_note = (
+                    f"{effective_note}\n{soft_line}".strip() if effective_note else soft_line
+                )
+
         for _ in range(3):
             check_activity_revision(target, expected_revision)
             if target["status"] not in {"recruiting", "active"}:
                 break
-            if await self._save_completion(target, closing_note):
-                sync_report = await self.sync_outcome_records(aid)
+            if await self._save_completion(target, effective_note):
+                poster_path = ""
+                if self.poster_on_complete() and target.get("category") != "mini_game":
+                    poster_res = await self.generate_activity_poster(aid, umo=umo)
+                    if poster_res.get("ok"):
+                        poster_path = str(poster_res.get("image_path") or "")
+                sync_report = await self.sync_outcome_records(aid, image_path=poster_path)
                 outcome = await asyncio.to_thread(self.store.get_outcome, aid)
+                if outcome is not None:
+                    if poster_path:
+                        outcome["poster_path"] = poster_path
+                    if steam_report:
+                        outcome["steam_battle_report"] = steam_report
+                    parts_final = await asyncio.to_thread(self.store.get_participants, aid)
+                    await emit_entertainment_signal(
+                        self.context,
+                        umo=umo,
+                        signal_type="steam_party" if steam_report else "activity_completed",
+                        summary=str(outcome.get("summary") or ""),
+                        participants=[
+                            p for p in parts_final if p.get("status", "joined") == "joined"
+                        ],
+                        metadata={
+                            "activity_id": aid,
+                            "category": target.get("category", ""),
+                            "poster_path": poster_path,
+                        },
+                        mood_hint="celebratory",
+                    )
                 return True, sync_report, outcome
             target = await asyncio.to_thread(self.store.get_activity, aid, umo=umo)
             if target is None:
@@ -347,7 +732,9 @@ class ActivityCoordinator:
             stats=stats,
         )
 
-    async def sync_outcome_records(self, activity_id: str) -> str:
+    async def sync_outcome_records(
+        self, activity_id: str, *, image_path: str = ""
+    ) -> str:
         """Idempotently sync a completed activity's experience to Memory and outcome to Chronicle."""
         act = await asyncio.to_thread(self.store.get_activity, activity_id)
         if act is None or act["status"] != "completed":
@@ -357,15 +744,18 @@ class ActivityCoordinator:
             return "成果归档正在同步，请稍后查看回执。"
         self._syncing_outcomes.add(activity_id)
         try:
-            return await self._sync_outcome_records(act)
+            return await self._sync_outcome_records(act, image_path=image_path)
         finally:
             self._syncing_outcomes.remove(activity_id)
 
-    async def _sync_outcome_records(self, act: dict[str, Any]) -> str:
+    async def _sync_outcome_records(
+        self, act: dict[str, Any], *, image_path: str = ""
+    ) -> str:
         activity_id = act["id"]
         outcome = await asyncio.to_thread(self.store.get_outcome, activity_id)
         if outcome is None:
             return "未找到活动成果，跳过外部归档。"
+        effective_img = str(image_path or outcome.get("poster_path") or "").strip()
 
         participants = await asyncio.to_thread(self.store.get_participants, activity_id)
         contributions = await asyncio.to_thread(
@@ -415,6 +805,7 @@ class ActivityCoordinator:
                 participants=participants,
                 source_refs=source_refs[:24],
                 occurred_at=act.get("completed_at") or time.time(),
+                image_path=effective_img,
             )
             await asyncio.to_thread(
                 self.store.update_sync_status,
@@ -448,6 +839,7 @@ class ActivityCoordinator:
                 valuable=True,
                 importance=int(outcome.get("importance") or 1),
                 admission_mode=self.chronicle_admission_mode(),
+                image_path=effective_img,
             )
             await asyncio.to_thread(
                 self.store.update_sync_status,
@@ -559,6 +951,19 @@ class ActivityCoordinator:
         )
         if created and outcome is not None:
             await self.sync_outcome_records(outcome["activity_id"])
+            await emit_entertainment_signal(
+                self.context,
+                umo=umo,
+                signal_type=str(game_key or "mini_game"),
+                summary=summary,
+                participants=participants,
+                metadata={
+                    "activity_id": outcome["activity_id"],
+                    "game_key": game_key,
+                    "rounds": int(rounds),
+                },
+                mood_hint="playful",
+            )
             refreshed = await asyncio.to_thread(
                 self.store.get_outcome, outcome["activity_id"]
             )
@@ -570,6 +975,7 @@ class ActivityCoordinator:
         return {
             "memory": memory_status(self.context),
             "chronicle": chronicle_status(self.context),
+            "visual": visual_status(self.context),
         }
 
     async def get_group_activity_context(self, umo: str) -> dict[str, Any]:

@@ -688,16 +688,27 @@ async function loadOutcomeDetail(actId) {
 function renderEngines() {
   const grid = $('#engine-grid');
   grid.replaceChildren();
+  const banner = $('#engines-scope-banner');
+  if (banner) {
+    banner.hidden = !currentUmo;
+    if (currentUmo) {
+      setText(banner, `当前群作用域：${formatScopeLabel(currentUmo)}（可单独覆盖本群娱乐引擎启停，无需改动全局默认开关）`);
+    }
+  }
   for (const eng of overviewData?.engines || []) {
     const title = eng.label || eng.title || eng.key;
-    const card = el('article', `engine-card${eng.enabled ? '' : ' off'}`);
+    const effEnabled = currentUmo ? (eng.group_enabled ?? eng.enabled) : eng.enabled;
+    const card = el('article', `engine-card${effEnabled ? '' : ' off'}`);
     const top = el('div', 'card-top');
     const left = el('div');
+    const overrideNote = currentUmo && eng.group_override !== null && eng.group_override !== undefined
+      ? ` · 本群覆盖：${eng.group_override ? '开启' : '停用'}`
+      : '';
     left.append(
       el('h3', '', title),
-      el('p', 'muted', `分类：${eng.category || '群聊娱乐'}${eng.active_rooms ? ` · 当前活跃房间/群组 ${eng.active_rooms}` : ''}`)
+      el('p', 'muted', `分类：${eng.category || '群聊娱乐'}${eng.active_rooms ? ` · 当前活跃房间/群组 ${eng.active_rooms}` : ''}${overrideNote}`)
     );
-    top.append(left, el('span', eng.enabled ? 'badge' : 'badge neutral', eng.enabled ? '运行中' : '已停用'));
+    top.append(left, el('span', effEnabled ? 'badge' : 'badge neutral', effEnabled ? '运行中' : '已停用'));
     card.append(top);
     card.append(el('p', '', eng.desc || eng.summary || ''));
 
@@ -709,7 +720,7 @@ function renderEngines() {
     card.append(chips);
 
     const actions = el('div', 'actions-row');
-    const toggleBtn = el('button', eng.enabled ? '' : 'primary', eng.enabled ? '停用此模块' : '启用此模块');
+    const toggleBtn = el('button', eng.enabled ? '' : 'primary', eng.enabled ? '全局停用' : '全局启用');
     toggleBtn.type = 'button';
     toggleBtn.onclick = async () => {
       const epoch = scopeEpoch;
@@ -717,12 +728,12 @@ function renderEngines() {
       if (!toggleBtn.isConnected || toggleBtn.disabled) return;
       toggleBtn.disabled = true;
       try {
-        const res = await apiPost('toggle_module', {key: eng.key, enabled: !eng.enabled}, valid);
+        const res = await apiPost('toggle_module', {key: eng.key, enabled: !eng.enabled, umo: currentUmo}, valid);
         if (!valid() || !overviewData) return;
         overviewData.engines = res.engines || overviewData.engines;
         renderEngines();
         renderHome();
-        setNotice(`已${res.enabled ? '启用' : '停用'}「${title}」模块`);
+        setNotice(`已全局${res.enabled ? '启用' : '停用'}「${title}」模块`);
       } catch (err) {
         if (valid()) setNotice(err.message, true);
       } finally {
@@ -731,21 +742,189 @@ function renderEngines() {
     };
     actions.append(toggleBtn);
 
-    if (eng.has_subpage && eng.subpage) {
-      const subBtn = el('button', 'primary', '打开今日老婆好感度与关系图');
-      subBtn.type = 'button';
-      subBtn.onclick = async () => {
-        const bridge = (window.DynamicsPanelBridge || window.AstrBotPluginPage || window.AstrBotPluginView);
-        if (typeof bridge?.navigateToPlugin === 'function') {
-          await bridge.navigateToPlugin('astrbot_plugin_dynamics_games', eng.subpage, document.documentElement.dataset.uiTheme);
-        } else {
-          setNotice('当前宿主页面不支持子面板直跳，请从插件详情页打开「今日老婆好感度」。', true);
+    if (currentUmo) {
+      const grpBtn = el('button', effEnabled ? '' : 'primary', effEnabled ? '仅本群停用' : '仅本群启用');
+      grpBtn.type = 'button';
+      grpBtn.disabled = !eng.enabled;
+      grpBtn.onclick = async () => {
+        const epoch = scopeEpoch;
+        const valid = () => epoch === scopeEpoch;
+        if (!grpBtn.isConnected || grpBtn.disabled) return;
+        grpBtn.disabled = true;
+        try {
+          const res = await apiPost('toggle_group_module', {
+            umo: currentUmo,
+            key: eng.key,
+            enabled: !effEnabled,
+          }, valid);
+          if (!valid() || !overviewData) return;
+          overviewData.engines = res.engines || overviewData.engines;
+          renderEngines();
+          setNotice(`已在当前群${res.enabled ? '启用' : '停用'}「${title}」`);
+        } catch (err) {
+          if (valid()) setNotice(err.message, true);
+        } finally {
+          grpBtn.disabled = false;
         }
       };
-      actions.append(subBtn);
+      actions.append(grpBtn);
+    }
+
+    if (eng.key === 'steam_monitor') {
+      const steamBtn = el('button', 'primary', '管理 Steam 群绑定');
+      steamBtn.type = 'button';
+      steamBtn.onclick = () => {
+        const panel = $('#steam-console-card');
+        if (panel) panel.scrollIntoView({behavior: 'smooth', block: 'start'});
+        loadSteamConsole();
+      };
+      actions.append(steamBtn);
     }
     card.append(actions);
     grid.append(card);
+  }
+}
+
+async function loadSteamConsole() {
+  const box = $('#steam-groups-list');
+  const badge = $('#steam-runtime-badge');
+  if (!box) return;
+  const valid = nextRequest('steamOverview');
+  setLoading(box, true);
+  try {
+    const data = await apiGet('steam_overview', {umo: currentUmo});
+    if (!valid()) return;
+    const rt = data.runtime_summary || {};
+    if (badge) {
+      badge.className = rt.has_api_key ? 'badge' : 'badge warn';
+      setText(
+        badge,
+        rt.has_api_key
+          ? `监控 ${rt.monitored_groups ?? 0} 群 · ${rt.monitored_players ?? 0} 人 · ${rt.playing_count ?? 0} 在玩`
+          : '未配置 Steam API Key'
+      );
+    }
+    const gidInput = $('#steam-bind-gid');
+    if (gidInput && !gidInput.value && currentUmo.includes(':GroupMessage:')) {
+      gidInput.value = currentUmo.split(':GroupMessage:')[1] || '';
+    }
+    renderSteamGroups(data.groups || [], data.bindings || []);
+  } catch (err) {
+    if (valid()) {
+      if (badge) {
+        badge.className = 'badge neutral';
+        setText(badge, 'Steam 监控未就绪');
+      }
+      box.replaceChildren(el('p', 'empty', err?.message || '无法加载 Steam 监控面板'));
+    }
+  } finally {
+    if (valid()) setLoading(box, false);
+  }
+}
+
+function renderSteamGroups(groups = [], bindings = []) {
+  const box = $('#steam-groups-list');
+  if (!box) return;
+  box.replaceChildren();
+  if (!groups.length && !bindings.length) {
+    box.append(el('div', 'empty', '暂无 Steam 监控群组或玩家绑定。可在上方表单输入 SteamID64 直接绑定。'));
+    return;
+  }
+  for (const g of groups) {
+    const card = el('div', 'steam-group-row');
+    const head = el('div', 'card-top');
+    const titleBox = el('div');
+    titleBox.append(
+      el('strong', '', `群 ${g.group_id}`),
+      el('span', 'muted', ` · ${g.player_count || 0} 位监控玩家${g.notify_session ? ` · 路由 ${g.notify_session}` : ''}`)
+    );
+    const switches = el('div', 'steam-switches');
+    for (const [field, label] of [
+      ['monitor_enabled', '状态推送'],
+      ['achievement_enabled', '成就推送'],
+      ['rank_push_enabled', '每日日报'],
+    ]) {
+      const active = Boolean(g[field]);
+      const btn = el('button', active ? 'badge' : 'badge neutral', `${label}：${active ? '开' : '关'}`);
+      btn.type = 'button';
+      btn.onclick = async () => {
+        btn.disabled = true;
+        try {
+          await apiPost('steam_group_switch', {group_id: g.group_id, field, enabled: !active});
+          setNotice(`已更新群 ${g.group_id} 的「${label}」开关`);
+          await loadSteamConsole();
+        } catch (err) {
+          setNotice(err?.message || '切换失败', true);
+        } finally {
+          btn.disabled = false;
+        }
+      };
+      switches.append(btn);
+    }
+    head.append(titleBox, switches);
+    card.append(head);
+
+    const plist = el('div', 'roster-chips');
+    if (!(g.players || []).length) {
+      plist.append(el('span', 'muted', '本群暂无监控玩家'));
+    } else {
+      for (const p of g.players) {
+        const chip = el('span', 'roster-chip steam-player-chip');
+        const playingTxt = p.playing_game ? ` · 🎮 ${p.playing_game}` : '';
+        chip.append(el('span', '', `${p.display_name || p.steam_id} (${p.steam_id})${playingTxt}`));
+        const rmBtn = el('button', 'chip-del-btn', '移除');
+        rmBtn.type = 'button';
+        rmBtn.onclick = async () => {
+          rmBtn.disabled = true;
+          try {
+            await apiPost('steam_player_action', {
+              action: 'remove_group',
+              group_id: g.group_id,
+              steam_id: p.steam_id,
+            });
+            setNotice(`已从群 ${g.group_id} 移除 ${p.display_name || p.steam_id}`);
+            await loadSteamConsole();
+          } catch (err) {
+            setNotice(err?.message || '移除失败', true);
+          } finally {
+            rmBtn.disabled = false;
+          }
+        };
+        chip.append(rmBtn);
+        plist.append(chip);
+      }
+    }
+    card.append(plist);
+    box.append(card);
+  }
+
+  if (bindings.length) {
+    const bWrap = el('div', 'steam-group-row');
+    bWrap.append(el('strong', '', `已绑定玩家账号（${bindings.length}）`));
+    const bList = el('div', 'roster-chips');
+    for (const b of bindings.slice(0, 40)) {
+      const chip = el('span', 'roster-chip steam-player-chip');
+      const label = `${b.nickname || b.last_persona_name || b.steam_id} · ${b.steam_id}${b.qq_id ? ` · QQ:${b.qq_id}` : ''}`;
+      chip.append(el('span', '', label));
+      const unbindBtn = el('button', 'chip-del-btn', '解绑');
+      unbindBtn.type = 'button';
+      unbindBtn.onclick = async () => {
+        unbindBtn.disabled = true;
+        try {
+          await apiPost('steam_player_action', {action: 'unbind', steam_id: b.steam_id});
+          setNotice(`已解除 ${b.steam_id} 绑定`);
+          await loadSteamConsole();
+        } catch (err) {
+          setNotice(err?.message || '解绑失败', true);
+        } finally {
+          unbindBtn.disabled = false;
+        }
+      };
+      chip.append(unbindBtn);
+      bList.append(chip);
+    }
+    bWrap.append(bList);
+    box.append(bWrap);
   }
 }
 
@@ -805,7 +984,10 @@ async function switchTab(tab, directId = '') {
   }
   if (tab === 'activities') await loadActivities(activityPage, directId);
   if (tab === 'outcomes') await loadOutcomes(outcomePage, directId);
-  if (tab === 'engines') renderEngines();
+  if (tab === 'engines') {
+    renderEngines();
+    await loadSteamConsole();
+  }
 }
 
 async function refreshAll(message = '', directOutcomeId = '') {
@@ -825,7 +1007,10 @@ async function refreshAll(message = '', directOutcomeId = '') {
     renderHomeOpenList(openRes.items || []);
     if (activeTab === 'activities' && !await loadActivities()) return false;
     if (activeTab === 'outcomes' && !await loadOutcomes(outcomePage, directOutcomeId)) return false;
-    if (activeTab === 'engines') renderEngines();
+    if (activeTab === 'engines') {
+      renderEngines();
+      await loadSteamConsole();
+    }
     if (!valid()) return false;
     setNotice(message || `已同步群间游戏控制台 (${overviewData.version || 'v0.1.0'})${currentUmo ? ' · 当前会话 ' + formatScopeLabel(currentUmo) : ''}`);
     return true;
@@ -880,6 +1065,35 @@ $('#act-include-mini').addEventListener('change', () => loadActivities(1));
 $('#goto-create-btn').addEventListener('click', () => openCreateDialog('reading'));
 $('#open-create-dialog').addEventListener('click', () => openCreateDialog($('#act-category-filter').value || 'reading'));
 $('#goto-activities-btn').addEventListener('click', () => switchTab('activities'));
+const steamRefreshBtn = $('#steam-panel-refresh-btn');
+if (steamRefreshBtn) steamRefreshBtn.addEventListener('click', () => loadSteamConsole());
+const steamBindForm = $('#steam-bind-form');
+if (steamBindForm) {
+  steamBindForm.addEventListener('submit', async e => {
+    e.preventDefault();
+    const btn = $('#steam-bind-submit');
+    if (btn?.disabled) return;
+    if (btn) btn.disabled = true;
+    try {
+      const res = await apiPost('steam_player_action', {
+        action: 'bind',
+        group_id: $('#steam-bind-gid')?.value.trim() || '',
+        steam_id: $('#steam-bind-sid')?.value.trim() || '',
+        qq_id: $('#steam-bind-qq')?.value.trim() || '',
+        nickname: $('#steam-bind-nick')?.value.trim() || '',
+      });
+      if ($('#steam-bind-sid')) $('#steam-bind-sid').value = '';
+      if ($('#steam-bind-qq')) $('#steam-bind-qq').value = '';
+      if ($('#steam-bind-nick')) $('#steam-bind-nick').value = '';
+      setNotice(res?.message || 'Steam 绑定成功');
+      await loadSteamConsole();
+    } catch (err) {
+      setNotice(err?.message || 'Steam 绑定失败', true);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+}
 
 $('#create-cancel-btn').addEventListener('click', () => $('#create-dialog').close());
 $('#create-form').addEventListener('submit', async e => {

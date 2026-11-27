@@ -54,6 +54,22 @@ OneBot 平台：其他人禁言秒数 = |与第一名点数差| × 配置值；
 
 发送 /21点帮助 可再次查看本说明。"""
 
+SOFT_PENALTY_TITLES: tuple[str, ...] = (
+    "「本局非酋担当」",
+    "「21点爆牌艺术家」",
+    "「牌桌慈善家」",
+    "「精准避开21点大师」",
+    "「差一点点就赢了君」",
+)
+
+SOFT_PENALTY_TRUTHS: tuple[str, ...] = (
+    "最近一次让你笑出声的小事是什么？",
+    "如果明天突然多出一天假期，你最想拿来做什么？",
+    "你手机里最近一张想分享但没发出来的表情包或梗是什么？",
+    "最近单曲循环或者最想安利给群友的一首歌/作品是什么？",
+    "你最近买过最值或最离谱的一件小东西是什么？",
+)
+
 SOFT_PENALTIES: tuple[str, ...] = (
     "给本局第一发一句真诚彩虹屁",
     "在群里发一个最能代表此刻心情的表情包认输",
@@ -346,6 +362,11 @@ class Blackjack21Plugin(Component):
             return raw.strip().lower() in {"1", "true", "yes", "on"}
         return bool(raw)
 
+    def _penalty_mode(self) -> str:
+        """Return 'auto' (OneBot mute -> soft fallback), 'mute', or 'soft'."""
+        raw = str(self.config.get("penalty_mode", "auto") or "auto").strip().lower()
+        return raw if raw in {"auto", "mute", "soft"} else "auto"
+
     def _joker_rules_section(self, *, enabled: bool | None = None) -> str:
         """Build the joker-mode section for rule help text.
 
@@ -423,12 +444,18 @@ class Blackjack21Plugin(Component):
 
     @staticmethod
     def _pick_soft_penalty(room: Room, player: Player, diff: int) -> str:
-        """Pick a deterministic-yet-varied lighthearted soft penalty for non-OneBot rooms."""
+        """Pick a deterministic-yet-varied lighthearted soft penalty (title / truth / defeat card)."""
         seed_text = f"{room.room_key}:{room.started_at_ns}:{room.round_no}:{player.user_id}:{diff}"
-        idx = int(hashlib.sha256(seed_text.encode("utf-8")).hexdigest(), 16) % len(
-            SOFT_PENALTIES
-        )
-        return SOFT_PENALTIES[idx]
+        digest = int(hashlib.sha256(seed_text.encode("utf-8")).hexdigest(), 16)
+        bucket = digest % 3
+        if bucket == 0:
+            title = SOFT_PENALTY_TITLES[(digest // 3) % len(SOFT_PENALTY_TITLES)]
+            return f"🏷️ 临时搞笑称呼：本轮喜提 {title}（持续至下局）"
+        if bucket == 1:
+            q = SOFT_PENALTY_TRUTHS[(digest // 3) % len(SOFT_PENALTY_TRUTHS)]
+            return f"🎯 强制真心话 1 题：{q}"
+        dare = SOFT_PENALTIES[(digest // 3) % len(SOFT_PENALTIES)]
+        return f"🃏 败北纪念卡（差 {diff} 点）：{dare}"
 
     def _result(
         self,
@@ -958,7 +985,8 @@ class Blackjack21Plugin(Component):
 
         parts: list[Any] = ["🏁 21点本局结束！\n"]
         parts.extend(self._room_parts(room, settle=True))
-        can_ban = self._supports_onebot_ban(room)
+        penalty_mode = self._penalty_mode()
+        can_ban = penalty_mode != "soft" and self._supports_onebot_ban(room)
         parts.append("\n本局第一：")
         for i, p in enumerate(winners):
             if i:
@@ -966,6 +994,8 @@ class Blackjack21Plugin(Component):
             parts.extend([p, f"({hand_value(p.cards)}点)"])
         if can_ban:
             parts.append(" —— 不用禁言\n")
+        elif penalty_mode == "soft":
+            parts.append(" —— 本局获胜 🏆（趣味软惩罚模式，免罚）\n")
         else:
             parts.append(" —— 本局获胜 🏆（当前平台仅计分，免禁言）\n")
 
@@ -977,13 +1007,28 @@ class Blackjack21Plugin(Component):
             seconds = min(cap, max(per, diff * per))
             if can_ban and str(p.user_id).isdigit():
                 ok = await self._ban(room, p.user_id, seconds)
-                parts.extend(
-                    [
-                        p,
-                        f"：{score}点，与第一相差{diff}点 → 禁言{seconds}秒"
-                        + (" ✅\n" if ok else " ❌(权限不足)\n"),
-                    ]
-                )
+                if ok:
+                    parts.extend(
+                        [
+                            p,
+                            f"：{score}点，与第一相差{diff}点 → 禁言{seconds}秒 ✅\n",
+                        ]
+                    )
+                elif penalty_mode == "auto":
+                    soft_dare = self._pick_soft_penalty(room, p, diff)
+                    parts.extend(
+                        [
+                            p,
+                            f"：{score}点，与第一相差{diff}点 → 无禁言权限，转为趣味软惩罚（{soft_dare}）\n",
+                        ]
+                    )
+                else:
+                    parts.extend(
+                        [
+                            p,
+                            f"：{score}点，与第一相差{diff}点 → 禁言{seconds}秒 ❌(权限不足)\n",
+                        ]
+                    )
             else:
                 soft_dare = self._pick_soft_penalty(room, p, diff)
                 parts.extend(

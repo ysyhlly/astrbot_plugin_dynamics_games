@@ -703,3 +703,95 @@ class TasteMemoryStore:
             if r <= acc:
                 return food
         return weighted[-1][0]
+
+    def pick_food_for_group(
+        self,
+        user_ids: list[str],
+        candidates: list[str],
+        *,
+        rng: random.Random | None = None,
+    ) -> tuple[str | None, dict[str, Any]]:
+        """Pick a food safe for ALL users in ``user_ids`` (intersection of safe foods)."""
+        foods = [f for f in candidates if isinstance(f, str) and f.strip()]
+        clean_uids = list(dict.fromkeys(str(u).strip() for u in user_ids if str(u or "").strip()))
+        meta: dict[str, Any] = {
+            "participants": clean_uids,
+            "avoided_allergies": [],
+            "avoided_dislikes": [],
+            "shared_likes": [],
+            "relaxed_dislikes": False,
+        }
+        if not foods:
+            return None, meta
+        if not self.enabled or not clean_uids:
+            return (rng or random).choice(foods), meta
+
+        profiles = [self.get_profile(uid) for uid in clean_uids]
+        all_allergies = list(
+            dict.fromkeys(tag for p in profiles for tag in p.allergies if tag)
+        )
+        all_dislikes = list(
+            dict.fromkeys(tag for p in profiles for tag in p.dislikes if tag)
+        )
+        like_counts: dict[str, int] = {}
+        for p in profiles:
+            for like in set(p.likes):
+                like_counts[like] = like_counts.get(like, 0) + 1
+        shared_likes = [k for k, cnt in like_counts.items() if cnt >= 2]
+        meta["avoided_allergies"] = all_allergies
+        meta["avoided_dislikes"] = all_dislikes
+        meta["shared_likes"] = shared_likes
+
+        recent_keys = {
+            _normalize_food_key(f).lower()
+            for p in profiles
+            for f in p.recent_foods(self.avoid_recent_count)
+        }
+
+        def _hits_tags(food_key_l: str, tags: list[str]) -> bool:
+            for tag in tags:
+                t = tag.strip().lower()
+                if t and (t in food_key_l or food_key_l in t):
+                    return True
+            return False
+
+        weighted: list[tuple[str, float]] = []
+        for food in foods:
+            key = _normalize_food_key(food)
+            key_l = key.lower()
+            if any(p.is_forbidden(food) for p in profiles):
+                continue
+            weight = 1.0
+            like_hits = 0
+            for p in profiles:
+                if any(
+                    lk.lower() in key_l or key_l in lk.lower()
+                    for lk in p.likes
+                    if lk
+                ):
+                    like_hits += 1
+            if like_hits:
+                weight += 2.0 * like_hits
+                if like_hits >= 2:
+                    weight += 1.5
+            if key_l in recent_keys:
+                weight *= 0.15
+            weighted.append((food, max(0.05, weight)))
+
+        if not weighted:
+            meta["relaxed_dislikes"] = True
+            for food in foods:
+                key_l = _normalize_food_key(food).lower()
+                if not _hits_tags(key_l, all_allergies):
+                    weighted.append((food, 1.0))
+            if not weighted:
+                return None, meta
+
+        total = sum(w for _, w in weighted)
+        r = (rng or random).random() * total
+        acc = 0.0
+        for food, w in weighted:
+            acc += w
+            if r <= acc:
+                return food, meta
+        return weighted[-1][0], meta

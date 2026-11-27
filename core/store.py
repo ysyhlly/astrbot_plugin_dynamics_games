@@ -153,6 +153,14 @@ class ActivityStore:
                 PRAGMA user_version = 1;
                 """
             )
+            act_cols = {
+                str(r["name"])
+                for r in db.execute("PRAGMA table_info(activities)").fetchall()
+            }
+            if "stale_reminded_at" not in act_cols:
+                db.execute(
+                    "ALTER TABLE activities ADD COLUMN stale_reminded_at REAL NOT NULL DEFAULT 0"
+                )
             cols = {
                 str(r["name"])
                 for r in db.execute("PRAGMA table_info(outcomes)").fetchall()
@@ -168,6 +176,10 @@ class ActivityStore:
             if "last_sync_error" not in cols:
                 db.execute(
                     "ALTER TABLE outcomes ADD COLUMN last_sync_error TEXT NOT NULL DEFAULT ''"
+                )
+            if "poster_path" not in cols:
+                db.execute(
+                    "ALTER TABLE outcomes ADD COLUMN poster_path TEXT NOT NULL DEFAULT ''"
                 )
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_outcomes_sync ON outcomes(next_sync_at, memory_status, chronicle_status)"
@@ -448,12 +460,100 @@ class ActivityStore:
                 ).fetchone()
             return self._hydrate_activity(row)
 
+    def list_activities_needing_reminder(
+        self,
+        *,
+        stale_expire_seconds: float,
+        reminder_lead_seconds: float = 86400.0,
+        umo: str = "",
+        now: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Find open activities within reminder_lead_seconds of stale expiry that haven't been reminded."""
+        expire_age = float(stale_expire_seconds or 0)
+        lead = float(reminder_lead_seconds or 0)
+        if expire_age <= 0 or lead <= 0:
+            return []
+        ts = time.time() if now is None else float(now)
+        warn_cutoff = ts - max(0.0, expire_age - lead)
+        expire_cutoff = ts - expire_age
+        clause = (
+            "status IN ('recruiting', 'active') AND category!='mini_game' "
+            "AND stale_reminded_at = 0 AND updated_at <= ? AND updated_at > ?"
+        )
+        params: list[Any] = [warn_cutoff, expire_cutoff]
+        if umo:
+            clause += " AND umo=?"
+            params.append(umo)
+        with self.connection(write=False) as db:
+            rows = db.execute(
+                f"SELECT * FROM activities WHERE {clause} ORDER BY updated_at ASC LIMIT 30",
+                tuple(params),
+            ).fetchall()
+            return [
+                act
+                for act in (self._hydrate_activity(r) for r in rows)
+                if act is not None
+            ]
+
+    def mark_stale_reminded(
+        self, activity_id: str, *, now: float | None = None
+    ) -> None:
+        ts = time.time() if now is None else float(now)
+        with self.connection(write=True) as db:
+            db.execute(
+                "UPDATE activities SET stale_reminded_at=? WHERE id=?",
+                (ts, activity_id),
+            )
+
+    def update_outcome_poster(self, activity_id: str, poster_path: str) -> None:
+        clean = str(poster_path or "").strip()
+        with self.connection(write=True) as db:
+            db.execute(
+                "UPDATE outcomes SET poster_path=?, updated_at=? WHERE activity_id=?",
+                (clean, time.time(), activity_id),
+            )
+
     def resolve_active_activity(
-        self, umo: str, activity_id: str = "", category: str = ""
+        self,
+        umo: str,
+        activity_id: str = "",
+        category: str = "",
+        *,
+        preferred_uid: str = "",
     ) -> dict[str, Any] | None:
         if activity_id.strip():
             return self.get_activity(activity_id, umo=umo)
+        pref = str(preferred_uid or "").strip()
         with self.connection(write=False) as db:
+            if pref:
+                if category:
+                    row = db.execute(
+                        """
+                        SELECT a.* FROM activities a
+                        WHERE a.umo=? AND a.category=? AND a.status IN ('recruiting', 'active')
+                          AND EXISTS (
+                              SELECT 1 FROM participants p
+                              WHERE p.activity_id=a.id AND p.uid=? AND p.status='joined'
+                          )
+                        ORDER BY a.updated_at DESC LIMIT 1
+                        """,
+                        (umo, category, pref),
+                    ).fetchone()
+                else:
+                    row = db.execute(
+                        """
+                        SELECT a.* FROM activities a
+                        WHERE a.umo=? AND a.category!='mini_game' AND a.status IN ('recruiting', 'active')
+                          AND EXISTS (
+                              SELECT 1 FROM participants p
+                              WHERE p.activity_id=a.id AND p.uid=? AND p.status='joined'
+                          )
+                        ORDER BY a.updated_at DESC LIMIT 1
+                        """,
+                        (umo, pref),
+                    ).fetchone()
+                if row is not None:
+                    return self._hydrate_activity(row)
             if category:
                 row = db.execute(
                     """
@@ -679,6 +779,289 @@ class ActivityStore:
             )
             return True, f"已退出活动《{act['title']}》。"
 
+    def withdraw_last_contribution(
+        self,
+        umo: str,
+        uid: str,
+        *,
+        activity_id: str = "",
+        contribution_id: int | None = None,
+        is_admin: bool = False,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        """Withdraw the user's most recent contribution from an open activity."""
+        now = time.time()
+        clean_aid = str(activity_id or "").strip().lstrip("#").upper()
+        if clean_aid.isdigit():
+            clean_aid = f"G{clean_aid}"
+        with self.connection(write=True) as db:
+            if contribution_id is not None:
+                row = db.execute(
+                    """
+                    SELECT c.*, a.title AS act_title, a.status AS act_status
+                    FROM contributions c
+                    JOIN activities a ON a.id = c.activity_id
+                    WHERE c.id=? AND c.umo=?
+                    """,
+                    (int(contribution_id), umo),
+                ).fetchone()
+            elif clean_aid:
+                row = db.execute(
+                    """
+                    SELECT c.*, a.title AS act_title, a.status AS act_status
+                    FROM contributions c
+                    JOIN activities a ON a.id = c.activity_id
+                    WHERE c.umo=? AND UPPER(c.activity_id)=? AND c.uid=?
+                      AND a.status IN ('recruiting', 'active')
+                    ORDER BY c.id DESC LIMIT 1
+                    """,
+                    (umo, clean_aid, str(uid)),
+                ).fetchone()
+            else:
+                row = db.execute(
+                    """
+                    SELECT c.*, a.title AS act_title, a.status AS act_status
+                    FROM contributions c
+                    JOIN activities a ON a.id = c.activity_id
+                    WHERE c.umo=? AND c.uid=? AND a.status IN ('recruiting', 'active')
+                    ORDER BY c.id DESC LIMIT 1
+                    """,
+                    (umo, str(uid)),
+                ).fetchone()
+            if row is None:
+                return False, "未找到可撤回的进行中活动打卡/提交记录。", None
+            if row["act_status"] not in ("recruiting", "active"):
+                return False, "该活动已结束，无法撤回历史记录。", None
+            if not is_admin and str(row["uid"]) != str(uid):
+                return False, "仅本人或群管理员可撤回该条记录。", None
+
+            rec = dict(row)
+            db.execute("DELETE FROM contributions WHERE id=?", (rec["id"],))
+            db.execute(
+                """
+                UPDATE participants
+                SET contribution_count = CASE WHEN contribution_count > 0 THEN contribution_count - 1 ELSE 0 END,
+                    last_active_at = ?
+                WHERE activity_id=? AND uid=?
+                """,
+                (now, rec["activity_id"], rec["uid"]),
+            )
+            db.execute(
+                "UPDATE activities SET updated_at=?, revision=revision+1 WHERE id=?",
+                (now, rec["activity_id"]),
+            )
+            return (
+                True,
+                f"↩️ 已撤回你在《{rec['act_title']}》[{rec['activity_id']}] 的最近一条记录。",
+                rec,
+            )
+
+    def rebind_contribution(
+        self,
+        umo: str,
+        uid: str,
+        target_activity_id: str,
+        *,
+        contribution_id: int | None = None,
+        is_admin: bool = False,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        """Move the user's latest contribution to another open activity in the same group."""
+        now = time.time()
+        clean_target = str(target_activity_id or "").strip().lstrip("#").upper()
+        if clean_target.isdigit():
+            clean_target = f"G{clean_target}"
+        if not clean_target:
+            return False, "请指定要改绑的目标活动编号，例如：`/活动 改绑 G102`。", None
+
+        with self.connection(write=True) as db:
+            target_row = db.execute(
+                "SELECT * FROM activities WHERE UPPER(id)=? AND umo=?",
+                (clean_target, umo),
+            ).fetchone()
+            target_act = self._hydrate_activity(target_row)
+            if target_act is None:
+                return False, f"未在本群找到目标活动 `{clean_target}`。", None
+            if target_act["status"] not in ("recruiting", "active"):
+                return (
+                    False,
+                    f"目标活动《{target_act['title']}》已处于「{target_act['status_label']}」，无法改绑。",
+                    None,
+                )
+
+            if contribution_id is not None:
+                c_row = db.execute(
+                    """
+                    SELECT c.*, a.title AS act_title, a.status AS act_status
+                    FROM contributions c
+                    JOIN activities a ON a.id = c.activity_id
+                    WHERE c.id=? AND c.umo=?
+                    """,
+                    (int(contribution_id), umo),
+                ).fetchone()
+            else:
+                c_row = db.execute(
+                    """
+                    SELECT c.*, a.title AS act_title, a.status AS act_status
+                    FROM contributions c
+                    JOIN activities a ON a.id = c.activity_id
+                    WHERE c.umo=? AND c.uid=? AND a.status IN ('recruiting', 'active')
+                    ORDER BY c.id DESC LIMIT 1
+                    """,
+                    (umo, str(uid)),
+                ).fetchone()
+            if c_row is None:
+                return False, "未找到你最近可改绑的打卡/提交记录。", None
+            if c_row["act_status"] not in ("recruiting", "active"):
+                return False, "原活动已结束，无法改绑。", None
+            if not is_admin and str(c_row["uid"]) != str(uid):
+                return False, "仅本人或群管理员可改绑该条记录。", None
+            if str(c_row["activity_id"]).upper() == target_act["id"].upper():
+                return (
+                    False,
+                    f"该条记录已经在目标活动《{target_act['title']}》[{target_act['id']}] 中啦。",
+                    None,
+                )
+
+            src_aid = str(c_row["activity_id"])
+            c_uid = str(c_row["uid"])
+            c_name = str(c_row["name"] or c_uid)[:80]
+
+            # Ensure participant exists in target
+            p_target = db.execute(
+                "SELECT * FROM participants WHERE activity_id=? AND uid=?",
+                (target_act["id"], c_uid),
+            ).fetchone()
+            if not p_target:
+                db.execute(
+                    """
+                    INSERT INTO participants(
+                        activity_id, uid, name, role_note, status,
+                        contribution_count, joined_at, last_active_at
+                    ) VALUES (?, ?, ?, '', 'joined', 1, ?, ?)
+                    """,
+                    (target_act["id"], c_uid, c_name, now, now),
+                )
+            else:
+                db.execute(
+                    """
+                    UPDATE participants
+                    SET status='joined', contribution_count=contribution_count+1, last_active_at=?
+                    WHERE activity_id=? AND uid=?
+                    """,
+                    (now, target_act["id"], c_uid),
+                )
+            db.execute(
+                """
+                UPDATE participants
+                SET contribution_count = CASE WHEN contribution_count > 0 THEN contribution_count - 1 ELSE 0 END,
+                    last_active_at = ?
+                WHERE activity_id=? AND uid=?
+                """,
+                (now, src_aid, c_uid),
+            )
+            db.execute(
+                """
+                UPDATE contributions
+                SET activity_id=?, stage_index=?, stage_name=?
+                WHERE id=?
+                """,
+                (
+                    target_act["id"],
+                    int(target_act["stage_index"]),
+                    str(target_act["current_stage"]),
+                    int(c_row["id"]),
+                ),
+            )
+            db.execute(
+                "UPDATE activities SET updated_at=?, stale_reminded_at=0, revision=revision+1 WHERE id IN (?, ?)",
+                (now, src_aid, target_act["id"]),
+            )
+            return (
+                True,
+                f"🔀 已将最近一条记录从《{c_row['act_title']}》[{src_aid}] 改绑至《{target_act['title']}》[{target_act['id']}]！",
+                {
+                    "contribution_id": int(c_row["id"]),
+                    "from_activity_id": src_aid,
+                    "to_activity_id": target_act["id"],
+                    "target_activity": target_act,
+                },
+            )
+
+    def transfer_creator(
+        self,
+        activity_id: str,
+        *,
+        new_creator_uid: str,
+        new_creator_name: str = "",
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        """Transfer activity creator/owner role to another member."""
+        now = time.time()
+        clean_uid = str(new_creator_uid or "").strip()
+        if not clean_uid:
+            return False, "请指定新的发起人（支持 @成员 或填写昵称/UID）。", None
+        with self.connection(write=True) as db:
+            row = db.execute(
+                "SELECT * FROM activities WHERE id=?", (activity_id,)
+            ).fetchone()
+            act = self._hydrate_activity(row)
+            if act is None:
+                return False, "未找到该活动。", None
+            if act["status"] not in ("recruiting", "active"):
+                return False, f"活动已处于「{act['status_label']}」，无法移交发起人。", act
+
+            p_row = db.execute(
+                "SELECT * FROM participants WHERE activity_id=? AND uid=?",
+                (activity_id, clean_uid),
+            ).fetchone()
+            if p_row is None:
+                # Allow matching by participant nickname
+                p_row = db.execute(
+                    "SELECT * FROM participants WHERE activity_id=? AND status='joined' AND LOWER(name)=LOWER(?)",
+                    (activity_id, clean_uid),
+                ).fetchone()
+                if p_row is not None:
+                    clean_uid = str(p_row["uid"])
+
+            resolved_name = (
+                str(new_creator_name or "").strip()
+                or (str(p_row["name"]) if p_row is not None else "")
+                or clean_uid
+            )[:80]
+            if str(act["creator_uid"]) == clean_uid:
+                return False, f"{resolved_name} 已经是该活动的发起人啦。", act
+
+            if p_row is None:
+                db.execute(
+                    """
+                    INSERT INTO participants(
+                        activity_id, uid, name, role_note, status,
+                        contribution_count, joined_at, last_active_at
+                    ) VALUES (?, ?, ?, '发起人', 'joined', 0, ?, ?)
+                    """,
+                    (activity_id, clean_uid, resolved_name, now, now),
+                )
+            else:
+                db.execute(
+                    """
+                    UPDATE participants
+                    SET status='joined', name=?, role_note=COALESCE(NULLIF(role_note, ''), '发起人'), last_active_at=?
+                    WHERE activity_id=? AND uid=?
+                    """,
+                    (resolved_name, now, activity_id, clean_uid),
+                )
+
+            db.execute(
+                "UPDATE activities SET creator_uid=?, creator_name=?, updated_at=?, stale_reminded_at=0, revision=revision+1 WHERE id=?",
+                (clean_uid, resolved_name, now, activity_id),
+            )
+            updated = self._hydrate_activity(
+                db.execute("SELECT * FROM activities WHERE id=?", (activity_id,)).fetchone()
+            )
+            return (
+                True,
+                f"🤝 已将《{act['title']}》[{act['id']}] 的发起人移交给 {resolved_name}！",
+                updated,
+            )
+
     def update_stage(
         self,
         activity_id: str,
@@ -872,7 +1255,7 @@ class ActivityStore:
             db.execute(
                 """
                 UPDATE activities
-                SET status=?, stage_index=?, updated_at=?, revision=revision+1
+                SET status=?, stage_index=?, updated_at=?, stale_reminded_at=0, revision=revision+1
                 WHERE id=?
                 """,
                 (status, stage_idx, now, activity_id),

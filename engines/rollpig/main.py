@@ -148,12 +148,46 @@ class RollPigPlugin(Component):
             await event.send(event.plain_result(decision.message))
             return
 
-        pig = await asyncio.to_thread(self.service.draw, decision.user_id)
+        gid = ""
+        try:
+            gid = str(event.get_group_id() or "").strip()
+        except Exception:
+            gid = ""
+        uname = ""
+        try:
+            uname = str(event.get_sender_name() or "").strip()
+        except Exception:
+            uname = ""
+
+        social_fn = getattr(self.service, "draw_with_social_info", None)
+        outcome = None
+        if callable(social_fn):
+            outcome = await asyncio.to_thread(
+                social_fn,
+                decision.user_id,
+                group_id=gid,
+                user_name=uname,
+            )
+            pig = outcome.pig if outcome is not None else None
+        else:
+            pig = await asyncio.to_thread(self.service.draw, decision.user_id)
         if pig is None:
             await event.send(event.plain_result(CATALOG_UNAVAILABLE))
             return
 
         await self._send_card(event, pig, decision.user_id)
+        if outcome is not None and outcome.total_count > 0:
+            pct = min(100, round(outcome.collected_count * 100 / outcome.total_count))
+            lines = [
+                f"🐷 小猪图鉴进度：{outcome.collected_count}/{outcome.total_count}（{pct}%）"
+                + (" ✨ 新解锁图鉴！" if outcome.is_new_unlock else "")
+            ]
+            if outcome.collision_peers:
+                peers = "、".join(outcome.collision_peers[:5])
+                lines.append(
+                    f"🎉 撞猪彩蛋！你和 {peers} 今天抽到了同一只【{pig.name}】，猪缘满分！"
+                )
+            await event.send(event.plain_result("\n".join(lines)))
 
     async def _send_card(self, event: AstrMessageEvent, pig: Pig, user_id: str) -> None:
         """渲染并发送卡片；渲染或发送失败时降级为原始图片 + 文本。"""

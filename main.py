@@ -31,21 +31,26 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.star import star_registry
 
 from . import series_panels
+from .bridges.social_bridge import emit_entertainment_signal
 from .core.commands import (
     build_arcade_text,
     build_help_text,
     handle_cancel_command,
-    handle_category_shortcut,
+    handle_category_shortcut_with_media,
     handle_cleanup_command,
-    handle_complete_command,
+    handle_complete_with_media,
     handle_create_command,
     handle_detail_command,
     handle_join_command,
     handle_leave_command,
     handle_list_command,
     handle_outcome_command,
+    handle_poster_command,
+    handle_rebind_command,
     handle_stage_command,
-    handle_submit_command,
+    handle_submit_with_media,
+    handle_transfer_command,
+    handle_withdraw_command,
 )
 from .core.coordinator import ActivityCoordinator
 from .core.models import ENGINE_CATALOG
@@ -183,28 +188,97 @@ class DynamicsGamesPlugin(Star):
             gid = str(getattr(event, "group_id", "") or "").strip()
         return self._is_scope_disabled(umo, gid)
 
-    def module_enabled(self, key: str) -> bool:
+    def per_group_modules(self) -> dict[str, dict[str, bool]]:
+        raw_cfg = self.raw_config if isinstance(self.raw_config, dict) else {}
+        mods = raw_cfg.get("modules")
+        raw_map = (
+            mods.get("per_group_modules")
+            if isinstance(mods, dict) and isinstance(mods.get("per_group_modules"), dict)
+            else raw_cfg.get("per_group_modules")
+        )
+        if not isinstance(raw_map, dict):
+            return {}
+        out: dict[str, dict[str, bool]] = {}
+        for scope_key, val in raw_map.items():
+            sk = str(scope_key or "").strip()
+            if sk and isinstance(val, dict):
+                out[sk] = {
+                    str(k): bool(v)
+                    for k, v in val.items()
+                    if str(k) in MODULE_FLAG_MAP
+                }
+        return out
+
+    def module_enabled(
+        self, key: str, *, umo: str = "", group_id: str = ""
+    ) -> bool:
         flag = MODULE_FLAG_MAP.get(key, f"enable_{key}")
         mods = self.raw_config.get("modules")
         if isinstance(mods, dict) and flag in mods:
-            return bool(mods.get(flag, True))
-        return bool(self.raw_config.get(flag, True))
+            global_on = bool(mods.get(flag, True))
+        else:
+            global_on = bool(self.raw_config.get(flag, True))
+        if not global_on:
+            return False
+        clean_umo = str(umo or "").strip()
+        gid = str(group_id or "").strip() or self._extract_group_id_from_umo(clean_umo)
+        if clean_umo or gid:
+            pg = self.per_group_modules()
+            if clean_umo and clean_umo in pg and key in pg[clean_umo]:
+                return bool(pg[clean_umo][key])
+            if gid and gid in pg and key in pg[gid]:
+                return bool(pg[gid][key])
+        return True
 
     def set_module_enabled(self, key: str, enabled: bool) -> None:
         if key not in MODULE_FLAG_MAP:
             raise ValueError(f"未知模块: {key}")
         flag = MODULE_FLAG_MAP[key]
-        with self._config_lock:
+        with self._get_config_lock():
             mods = self.raw_config.get("modules")
             if not isinstance(mods, dict):
                 mods = {}
                 self.raw_config["modules"] = mods
             mods[flag] = bool(enabled)
-            if hasattr(self.raw_config, "save_config"):
-                self.raw_config.save_config()
+            self._persist_raw_config()
 
-    def module_states(self) -> dict[str, bool]:
-        return {k: self.module_enabled(k) for k in MODULE_FLAG_MAP}
+    def set_group_module_enabled(
+        self, umo: str, key: str, enabled: bool | None
+    ) -> None:
+        """Persist a per-group override for an entertainment engine module."""
+        if key not in MODULE_FLAG_MAP:
+            raise ValueError(f"未知模块: {key}")
+        target = str(umo or "").strip()
+        if not target:
+            raise ValueError("缺少目标群 UMO")
+        with self._get_config_lock():
+            mods = self.raw_config.get("modules")
+            if not isinstance(mods, dict):
+                mods = {}
+                self.raw_config["modules"] = mods
+            pg = mods.get("per_group_modules")
+            if not isinstance(pg, dict):
+                pg = {}
+                mods["per_group_modules"] = pg
+            group_map = pg.get(target)
+            if not isinstance(group_map, dict):
+                group_map = {}
+                pg[target] = group_map
+            if enabled is None:
+                group_map.pop(key, None)
+                if not group_map:
+                    pg.pop(target, None)
+            else:
+                group_map[key] = bool(enabled)
+            self._persist_raw_config()
+
+    def module_states(
+        self, *, umo: str = "", group_id: str = ""
+    ) -> dict[str, bool]:
+        return {
+            k: self.module_enabled(k, umo=umo, group_id=group_id)
+            for k in MODULE_FLAG_MAP
+        }
 
     def _detect_legacy_conflicts(self) -> list[str]:
         found: list[str] = []
@@ -240,7 +314,7 @@ class DynamicsGamesPlugin(Star):
             db_path = StarTools.get_data_dir(PLUGIN_ID) / "dynamics_games.db"
             self.store = await asyncio.to_thread(ActivityStore, db_path)
             self.coordinator = ActivityCoordinator(
-                self.store, self.context, self.raw_config
+                self.store, self.context, self.raw_config, plugin=self
             )
             self.web_console = GamesWebConsole(self)
             self.web_console.register()
@@ -259,6 +333,8 @@ class DynamicsGamesPlugin(Star):
                     inst.room_manager.outcome_callback = self.coordinator.enqueue_truth_outcome
                 elif key == "blackjack21":
                     inst.outcome_callback = self.coordinator.record_minigame_outcome
+                elif key == "what_to_eat":
+                    inst.signal_callback = self._emit_engine_signal
                 init_fn = getattr(inst, "initialize", None)
                 if callable(init_fn):
                     res = init_fn()
@@ -362,6 +438,25 @@ class DynamicsGamesPlugin(Star):
             return False
         return not self._is_in_quiet_hours()
 
+    async def _emit_engine_signal(self, **kwargs: Any) -> dict[str, Any]:
+        return await emit_entertainment_signal(self.context, **kwargs)
+
+    @staticmethod
+    def _event_umo_and_gid(event: AstrMessageEvent | None) -> tuple[str, str]:
+        if event is None:
+            return "", ""
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        gid = ""
+        get_gid = getattr(event, "get_group_id", None)
+        if callable(get_gid):
+            try:
+                gid = str(get_gid() or "").strip()
+            except Exception:
+                gid = ""
+        if not gid:
+            gid = str(getattr(event, "group_id", "") or "").strip()
+        return umo, gid
+
     def _guard_event(
         self,
         event: AstrMessageEvent | None,
@@ -371,12 +466,11 @@ class DynamicsGamesPlugin(Star):
     ) -> tuple[Any | None, Any | None]:
         """Unified event gating distinguishing explicit commands from passive listeners.
 
-        - Explicit commands: check legacy conflicts, readiness, and module toggle
-          (return user-facing notice when blocked, never silently suppressed by
-          quiet_hours or passive exclude_groups).
-        - Passive listeners: silently drop when not ready, disabled, excluded by
-          Chat Dynamics ``exclude_groups``, or during ``quiet_hours``.
+        - Both explicit commands and passive listeners honor per-group module switches
+          (``per_group_modules``), scope disables, and Chat Dynamics ``exclude_groups``.
+        - Passive listeners also silently drop during ``quiet_hours``.
         """
+        ev_umo, ev_gid = self._event_umo_and_gid(event)
         if explicit:
             if self._legacy_conflicts:
                 if LEGACY_ENGINE_PLUGIN_MAP.get(key) in self._legacy_conflicts:
@@ -395,6 +489,12 @@ class DynamicsGamesPlugin(Star):
                     if event is not None
                     else None
                 )
+            if self._is_event_excluded_by_core(event):
+                return None, (
+                    event.plain_result("本群已被对话主控排除，群间游戏已停用。")
+                    if event is not None
+                    else None
+                )
             if self._is_scope_disabled_event(event):
                 return None, (
                     event.plain_result(
@@ -403,7 +503,7 @@ class DynamicsGamesPlugin(Star):
                     if event is not None
                     else None
                 )
-            if not self.module_enabled(key):
+            if not self.module_enabled(key, umo=ev_umo, group_id=ev_gid):
                 return None, (
                     self._disabled_reply(event, key) if event is not None else None
                 )
@@ -420,7 +520,7 @@ class DynamicsGamesPlugin(Star):
             not self._ready
             or self._closed
             or self._legacy_conflicts
-            or not self.module_enabled(key)
+            or not self.module_enabled(key, umo=ev_umo, group_id=ev_gid)
         ):
             return None, None
         if self._is_event_excluded_by_core(event) or self._is_scope_disabled_event(
@@ -1524,9 +1624,12 @@ class DynamicsGamesPlugin(Star):
             yield blocked
             return
         raw = self._extract_tail(event, ("打卡", "checkin", "progress", "记录"), args)
-        yield event.plain_result(
-            await handle_submit_command(self.coordinator, event, raw, kind="checkin")
+        text, img_path = await handle_submit_with_media(
+            self.coordinator, event, raw, kind="checkin"
         )
+        yield event.plain_result(text)
+        if img_path:
+            yield event.image_result(img_path)
 
     @activity_group.command("提交", alias={"续写", "submit", "contribute", "下一棒"})
     async def act_submit(self, event: AstrMessageEvent, args: str = ""):
@@ -1538,9 +1641,57 @@ class DynamicsGamesPlugin(Star):
         raw = self._extract_tail(
             event, ("提交", "续写", "submit", "contribute", "下一棒"), args
         )
-        yield event.plain_result(
-            await handle_submit_command(self.coordinator, event, raw, kind="submission")
+        text, img_path = await handle_submit_with_media(
+            self.coordinator, event, raw, kind="submission"
         )
+        yield event.plain_result(text)
+        if img_path:
+            yield event.image_result(img_path)
+
+    @activity_group.command("撤回", alias={"withdraw", "undo", "撤销"})
+    async def act_withdraw(self, event: AstrMessageEvent, args: str = ""):
+        """撤回自己在当前群最近一条打卡/提交记录"""
+        if self.coordinator is None:
+            yield event.plain_result("群间游戏尚未就绪。")
+            return
+        raw = self._extract_tail(event, ("撤回", "withdraw", "undo", "撤销"), args)
+        yield event.plain_result(
+            await handle_withdraw_command(self.coordinator, event, raw)
+        )
+
+    @activity_group.command("改绑", alias={"rebind", "转移打卡", "换绑"})
+    async def act_rebind(self, event: AstrMessageEvent, args: str = ""):
+        """将最近一条误投的打卡/提交记录改绑到指定活动编号"""
+        if self.coordinator is None:
+            yield event.plain_result("群间游戏尚未就绪。")
+            return
+        raw = self._extract_tail(event, ("改绑", "rebind", "转移打卡", "换绑"), args)
+        yield event.plain_result(
+            await handle_rebind_command(self.coordinator, event, raw)
+        )
+
+    @activity_group.command("移交", alias={"转让", "transfer", "换房主"})
+    async def act_transfer(self, event: AstrMessageEvent, args: str = ""):
+        """发起人或群管理员移交活动主持权"""
+        if self.coordinator is None:
+            yield event.plain_result("群间游戏尚未就绪。")
+            return
+        raw = self._extract_tail(event, ("移交", "转让", "transfer", "换房主"), args)
+        yield event.plain_result(
+            await handle_transfer_command(self.coordinator, event, raw)
+        )
+
+    @activity_group.command("配图", alias={"画报", "poster", "封面"})
+    async def act_poster(self, event: AstrMessageEvent, activity_id: str = ""):
+        """为活动生成图文画报（联动视觉工坊，无配图时自动回退 Pillow 画报）"""
+        if self.coordinator is None:
+            yield event.plain_result("群间游戏尚未就绪。")
+            return
+        raw = self._extract_tail(event, ("配图", "画报", "poster", "封面"), activity_id)
+        text, img_path = await handle_poster_command(self.coordinator, event, raw)
+        yield event.plain_result(text)
+        if img_path:
+            yield event.image_result(img_path)
 
     @activity_group.command("完结", alias={"定稿", "结算", "finish", "complete", "done"})
     async def act_complete(self, event: AstrMessageEvent, args: str = ""):
@@ -1551,9 +1702,12 @@ class DynamicsGamesPlugin(Star):
         raw = self._extract_tail(
             event, ("完结", "定稿", "结算", "finish", "complete", "done"), args
         )
-        yield event.plain_result(
-            await handle_complete_command(self.coordinator, event, raw)
+        text, poster_path = await handle_complete_with_media(
+            self.coordinator, event, raw
         )
+        yield event.plain_result(text)
+        if poster_path:
+            yield event.image_result(poster_path)
 
     @activity_group.command("取消", alias={"流局", "cancel", "abort"})
     async def act_cancel(self, event: AstrMessageEvent, args: str = ""):
@@ -1595,16 +1749,18 @@ class DynamicsGamesPlugin(Star):
         if blocked is not None:
             yield blocked
             return
+        ev_umo, ev_gid = self._event_umo_and_gid(event)
         raw = self._extract_tail(event, ("组织共读", "共读"), args)
-        yield event.plain_result(
-            await handle_category_shortcut(
-                self.coordinator,
-                event,
-                "reading",
-                raw,
-                module_states=self.module_states(),
-            )
+        text, img_path = await handle_category_shortcut_with_media(
+            self.coordinator,
+            event,
+            "reading",
+            raw,
+            module_states=self.module_states(umo=ev_umo, group_id=ev_gid),
         )
+        yield event.plain_result(text)
+        if img_path:
+            yield event.image_result(img_path)
 
     @filter.command("约局", alias={"游戏约局", "开黑"})
     async def shortcut_matchmaking(self, event: AstrMessageEvent, args: str = ""):
@@ -1613,16 +1769,18 @@ class DynamicsGamesPlugin(Star):
         if blocked is not None:
             yield blocked
             return
+        ev_umo, ev_gid = self._event_umo_and_gid(event)
         raw = self._extract_tail(event, ("游戏约局", "约局", "开黑"), args)
-        yield event.plain_result(
-            await handle_category_shortcut(
-                self.coordinator,
-                event,
-                "matchmaking",
-                raw,
-                module_states=self.module_states(),
-            )
+        text, img_path = await handle_category_shortcut_with_media(
+            self.coordinator,
+            event,
+            "matchmaking",
+            raw,
+            module_states=self.module_states(umo=ev_umo, group_id=ev_gid),
         )
+        yield event.plain_result(text)
+        if img_path:
+            yield event.image_result(img_path)
 
     @filter.command("接龙", alias={"接龙创作", "故事接龙"})
     async def shortcut_relay(self, event: AstrMessageEvent, args: str = ""):
@@ -1631,16 +1789,18 @@ class DynamicsGamesPlugin(Star):
         if blocked is not None:
             yield blocked
             return
+        ev_umo, ev_gid = self._event_umo_and_gid(event)
         raw = self._extract_tail(event, ("接龙创作", "故事接龙", "接龙"), args)
-        yield event.plain_result(
-            await handle_category_shortcut(
-                self.coordinator,
-                event,
-                "relay",
-                raw,
-                module_states=self.module_states(),
-            )
+        text, img_path = await handle_category_shortcut_with_media(
+            self.coordinator,
+            event,
+            "relay",
+            raw,
+            module_states=self.module_states(umo=ev_umo, group_id=ev_gid),
         )
+        yield event.plain_result(text)
+        if img_path:
+            yield event.image_result(img_path)
 
     @filter.command("挑战", alias={"小型挑战", "打卡挑战"})
     async def shortcut_challenge(self, event: AstrMessageEvent, args: str = ""):
@@ -1649,16 +1809,18 @@ class DynamicsGamesPlugin(Star):
         if blocked is not None:
             yield blocked
             return
+        ev_umo, ev_gid = self._event_umo_and_gid(event)
         raw = self._extract_tail(event, ("小型挑战", "打卡挑战", "挑战"), args)
-        yield event.plain_result(
-            await handle_category_shortcut(
-                self.coordinator,
-                event,
-                "challenge",
-                raw,
-                module_states=self.module_states(),
-            )
+        text, img_path = await handle_category_shortcut_with_media(
+            self.coordinator,
+            event,
+            "challenge",
+            raw,
+            module_states=self.module_states(umo=ev_umo, group_id=ev_gid),
         )
+        yield event.plain_result(text)
+        if img_path:
+            yield event.image_result(img_path)
 
     @filter.command("共创", alias={"共同制作", "共同制作作品"})
     async def shortcut_creation(self, event: AstrMessageEvent, args: str = ""):
@@ -1667,16 +1829,18 @@ class DynamicsGamesPlugin(Star):
         if blocked is not None:
             yield blocked
             return
+        ev_umo, ev_gid = self._event_umo_and_gid(event)
         raw = self._extract_tail(event, ("共同制作作品", "共同制作", "共创"), args)
-        yield event.plain_result(
-            await handle_category_shortcut(
-                self.coordinator,
-                event,
-                "creation",
-                raw,
-                module_states=self.module_states(),
-            )
+        text, img_path = await handle_category_shortcut_with_media(
+            self.coordinator,
+            event,
+            "creation",
+            raw,
+            module_states=self.module_states(umo=ev_umo, group_id=ev_gid),
         )
+        yield event.plain_result(text)
+        if img_path:
+            yield event.image_result(img_path)
 
     @staticmethod
     def _extract_tail(
@@ -2047,6 +2211,17 @@ class DynamicsGamesPlugin(Star):
                 yield reply
             return
         async for r in eng.cmd_taste_clear(event):
+            yield r
+
+    @filter.command("删除口味", alias=["移除口味"])
+    async def wte_taste_delete(self, event: AstrMessageEvent):
+        """删除指定口味标签"""
+        eng, reply = self._guard_engine(event, "what_to_eat")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        async for r in eng.cmd_taste_delete(event):
             yield r
 
     @filter.event_message_type(EventMessageType.ALL)

@@ -774,6 +774,224 @@ class SteamMonitorEngine(Component):
             "has_api_key": bool(str(self._cfg("steam_api_key", "") or "").strip()),
         }
 
+    def get_group_coop_candidates(
+        self, group_id: str, game_query: str = ""
+    ) -> dict[str, Any]:
+        """List Steam players currently playing or recently playing a matching game in this group."""
+        if self.store is None:
+            return {
+                "available": False,
+                "playing_now": [],
+                "recent_players": [],
+                "coop_groups": {},
+            }
+        gid = str(group_id or "").strip()
+        if not gid:
+            return {
+                "available": False,
+                "playing_now": [],
+                "recent_players": [],
+                "coop_groups": {},
+            }
+        sids = self.store.list_group_players(gid) or []
+        if not sids:
+            return {
+                "available": True,
+                "playing_now": [],
+                "recent_players": [],
+                "coop_groups": {},
+            }
+        bindings = self.store.get_bindings_map(sids)
+        active_map = self.store.load_active_sessions() or {}
+        now = time.time()
+        q = str(game_query or "").strip().lower()
+
+        def _matches_query(game_name: str) -> bool:
+            if not q:
+                return True
+            g = str(game_name or "").strip().lower()
+            if not g:
+                return False
+            if q in g or g in q:
+                return True
+            tokens = [t for t in re.split(r"[\s/·,，:：-]+", q) if len(t) >= 2]
+            return any(t in g for t in tokens)
+
+        playing_now: list[dict[str, Any]] = []
+        by_game: dict[str, list[dict[str, Any]]] = {}
+        playing_sids: set[str] = set()
+
+        for sid in sids:
+            sess = active_map.get(sid)
+            if sess is None or getattr(sess, "state", "") != "playing":
+                continue
+            gname = str(getattr(sess, "game_name", "") or "").strip()
+            name = self.store.resolve_display_name_from_binding(
+                bindings.get(sid), sid, getattr(sess, "player_name", "") or ""
+            )
+            entry = {
+                "steam_id": sid,
+                "qq_id": str((bindings.get(sid) or {}).get("qq_id") or ""),
+                "name": name,
+                "game_id": str(getattr(sess, "game_id", "") or ""),
+                "game_name": gname,
+                "duration_sec": max(0.0, now - float(getattr(sess, "started_at", now) or now)),
+            }
+            if gname:
+                by_game.setdefault(gname, []).append(entry)
+            if _matches_query(gname):
+                playing_now.append(entry)
+                playing_sids.add(sid)
+
+        coop_groups = {
+            gname: members
+            for gname, members in by_game.items()
+            if len(members) >= 2 and _matches_query(gname)
+        }
+
+        recent_players: list[dict[str, Any]] = []
+        if q:
+            seen_recent: set[str] = set()
+            past_sessions = self.store.query_play_sessions_overlapping(
+                now - 14 * 86400.0, now, steam_ids=sids
+            )
+            for row in past_sessions:
+                sid = str(row.get("steam_id") or "")
+                gname = str(row.get("game_name") or "")
+                if not sid or sid in playing_sids or sid in seen_recent:
+                    continue
+                if _matches_query(gname):
+                    seen_recent.add(sid)
+                    name = self.store.resolve_display_name_from_binding(
+                        bindings.get(sid), sid, ""
+                    )
+                    recent_players.append(
+                        {
+                            "steam_id": sid,
+                            "qq_id": str((bindings.get(sid) or {}).get("qq_id") or ""),
+                            "name": name,
+                            "game_name": gname,
+                        }
+                    )
+
+        return {
+            "available": True,
+            "playing_now": playing_now,
+            "recent_players": recent_players,
+            "coop_groups": coop_groups,
+        }
+
+    def build_party_battle_report(
+        self,
+        group_id: str,
+        game_query: str = "",
+        *,
+        since_ts: float = 0.0,
+        until_ts: float | None = None,
+    ) -> dict[str, Any]:
+        """Compile a post-match Steam playtime & achievement battle report for a matchmaking activity."""
+        if self.store is None:
+            return {"has_data": False, "summary": "", "players": [], "achievements": []}
+        gid = str(group_id or "").strip()
+        sids = self.store.list_group_players(gid) or []
+        if not sids:
+            return {"has_data": False, "summary": "", "players": [], "achievements": []}
+
+        end_ts = float(until_ts) if until_ts is not None else time.time()
+        start_ts = float(since_ts) if since_ts > 0 else (end_ts - 6 * 3600.0)
+        q = str(game_query or "").strip().lower()
+        bindings = self.store.get_bindings_map(sids)
+
+        def _matches(gname: str) -> bool:
+            if not q:
+                return True
+            g = str(gname or "").strip().lower()
+            if not g:
+                return False
+            if q in g or g in q:
+                return True
+            tokens = [t for t in re.split(r"[\s/·,，:：-]+", q) if len(t) >= 2]
+            return any(t in g for t in tokens)
+
+        per_player_sec: dict[str, float] = {}
+        per_player_games: dict[str, set[str]] = {}
+
+        past = self.store.query_play_sessions_overlapping(start_ts, end_ts, steam_ids=sids)
+        for row in past:
+            sid = str(row.get("steam_id") or "")
+            gname = str(row.get("game_name") or "")
+            if not sid or not _matches(gname):
+                continue
+            ov_start = max(start_ts, float(row.get("started_at") or start_ts))
+            ov_end = min(end_ts, float(row.get("ended_at") or end_ts))
+            if ov_end > ov_start:
+                per_player_sec[sid] = per_player_sec.get(sid, 0.0) + (ov_end - ov_start)
+                if gname:
+                    per_player_games.setdefault(sid, set()).add(gname)
+
+        active_map = self.store.load_active_sessions() or {}
+        for sid in sids:
+            sess = active_map.get(sid)
+            if sess is None or getattr(sess, "state", "") != "playing":
+                continue
+            gname = str(getattr(sess, "game_name", "") or "")
+            if not _matches(gname):
+                continue
+            ov_start = max(start_ts, float(getattr(sess, "started_at", start_ts) or start_ts))
+            if end_ts > ov_start:
+                per_player_sec[sid] = per_player_sec.get(sid, 0.0) + (end_ts - ov_start)
+                if gname:
+                    per_player_games.setdefault(sid, set()).add(gname)
+
+        if not per_player_sec:
+            return {"has_data": False, "summary": "", "players": [], "achievements": []}
+
+        players_rows: list[dict[str, Any]] = []
+        total_sec = 0.0
+        for sid, sec in sorted(per_player_sec.items(), key=lambda kv: kv[1], reverse=True):
+            total_sec += sec
+            name = self.store.resolve_display_name_from_binding(
+                bindings.get(sid), sid, ""
+            )
+            players_rows.append(
+                {
+                    "steam_id": sid,
+                    "name": name,
+                    "duration_sec": round(sec, 1),
+                    "duration_label": format_duration(sec),
+                    "games": sorted(per_player_games.get(sid, set())),
+                }
+            )
+
+        ach_rows = [
+            a
+            for a in getattr(self, "_recent_achievements", [])
+            if str(a.get("steam_id") or "") in per_player_sec
+            and float(a.get("ts") or 0) >= start_ts
+            and float(a.get("ts") or 0) <= end_ts
+        ]
+
+        detail_parts = [
+            f"{p['name']}({p['duration_label']})" for p in players_rows[:8]
+        ]
+        summary = (
+            f"🎮 Steam 局后战报：共 {len(players_rows)} 位同好玩伴，累计同玩 {format_duration(total_sec)}"
+            f"（{'、'.join(detail_parts)}）"
+        )
+        if ach_rows:
+            ach_names = "、".join(
+                f"{a.get('player_name', '')}解锁《{a.get('achievement_name', '')}》"
+                for a in ach_rows[:4]
+            )
+            summary += f"；本局新成就：{ach_names}"
+        return {
+            "has_data": True,
+            "summary": summary,
+            "total_duration_sec": round(total_sec, 1),
+            "players": players_rows,
+            "achievements": ach_rows,
+        }
+
     # ------------------------------------------------------------------
     # Monotonic Polling Loop & Global Batch Poll
     # ------------------------------------------------------------------

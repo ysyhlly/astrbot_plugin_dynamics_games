@@ -385,6 +385,17 @@ class FoodDataManager:
 
         return self.get_random_food(user_id=user_id)
 
+    def get_recommend_food_for_group(
+        self, user_ids: list[str]
+    ) -> tuple[str | None, dict[str, Any]]:
+        """Recommend a food honoring the intersection of all group members' safe tastes."""
+        foods = self.get_all_foods()
+        if not foods:
+            return None, {"participants": list(user_ids)}
+        if self.taste_memory and self.taste_memory.enabled and user_ids:
+            return self.taste_memory.pick_food_for_group(user_ids, foods)
+        return random.choice(foods), {"participants": list(user_ids)}
+
     def has_foods(self) -> bool:
         """检查是否有可用的本地食物。"""
         # 使用缓存列表避免重复计算

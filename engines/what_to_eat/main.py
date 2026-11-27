@@ -226,10 +226,27 @@ class WhatToEatPlugin(Component):
     # ------------------------------------------------------------------
 
     async def cmd_taste_show(self, event: AstrMessageEvent):
-        """查看自己的口味档案与最近推荐。"""
+        """查看自己的口味档案与最近推荐（也支持 `/口味 删除 <项>`）。"""
         event.should_call_llm(True)
         if not self.taste_memory.enabled:
             yield event.plain_result("口味记忆未启用。")
+            event.stop_event()
+            return
+        raw_items = self._parse_command_items(
+            event, prefixes=("我的口味", "口味档案", "口味")
+        )
+        if raw_items and raw_items[0].lower() in ("删除", "移除", "删", "del", "delete", "remove"):
+            targets = raw_items[1:]
+            user_id = str(event.get_sender_id() or "")
+            if not targets:
+                yield event.plain_result("用法：`/口味 删除 香菜 辣椒`（可一次删除多项喜欢/忌口/过敏标签）")
+                event.stop_event()
+                return
+            removed = self.taste_memory.remove_tags(user_id, targets)
+            if removed:
+                yield event.plain_result("已从你的口味档案中移除：" + "、".join(removed))
+            else:
+                yield event.plain_result("未在你的口味档案中找到匹配的标签：" + "、".join(targets))
             event.stop_event()
             return
         user_id = str(event.get_sender_id() or "")
@@ -237,6 +254,26 @@ class WhatToEatPlugin(Component):
         self.taste_memory.touch_nickname(user_id, nick)
         profile = self.taste_memory.get_profile(user_id)
         yield event.plain_result(self._format_taste_card(profile))
+        event.stop_event()
+
+    async def cmd_taste_delete(self, event: AstrMessageEvent):
+        """删除指定口味标签，用法：/删除口味 香菜 辣椒"""
+        event.should_call_llm(True)
+        if not self.taste_memory.enabled:
+            yield event.plain_result("口味记忆未启用。")
+            event.stop_event()
+            return
+        items = self._parse_command_items(event, prefixes=("删除口味", "移除口味"))
+        if not items:
+            yield event.plain_result("用法：`/删除口味 香菜 辣椒`（或 `/口味 删除 香菜`）")
+            event.stop_event()
+            return
+        user_id = str(event.get_sender_id() or "")
+        removed = self.taste_memory.remove_tags(user_id, items)
+        if removed:
+            yield event.plain_result("已从你的口味档案中移除：" + "、".join(removed))
+        else:
+            yield event.plain_result("未在你的口味档案中找到匹配的标签：" + "、".join(items))
         event.stop_event()
 
     async def cmd_taste_like(self, event: AstrMessageEvent):
@@ -388,6 +425,75 @@ class WhatToEatPlugin(Component):
                 yield thinking_result
 
             umo = event.unified_msg_origin
+            peer_uids = self._extract_peer_mentions(event, sender_id=user_id)
+            is_group_pick = bool(
+                peer_uids and ("一起" in message_text or "拼单" in message_text or len(peer_uids) >= 2)
+            )
+            if is_group_pick and self.food_manager.has_foods():
+                group_uids = [u for u in [user_id, *peer_uids] if u]
+                if self.taste_memory.enabled and user_id:
+                    await asyncio.to_thread(
+                        self.taste_memory.touch_nickname, user_id, nickname
+                    )
+                food, gmeta = await asyncio.to_thread(
+                    self.food_manager.get_recommend_food_for_group, group_uids
+                )
+                if not food:
+                    yield event.plain_result(
+                        "大家过敏原叠加后本地菜库没有完全安全的选项，建议现场协商定制菜单哦。"
+                    )
+                    event.stop_event()
+                    return
+                notes: list[str] = [f"🍽️ 多人合选结果（{len(group_uids)} 位群友）：推荐【{food}】！"]
+                if gmeta.get("avoided_allergies"):
+                    notes.append("· 已严格避开过敏原：" + "、".join(gmeta["avoided_allergies"][:8]))
+                if gmeta.get("avoided_dislikes") and not gmeta.get("relaxed_dislikes"):
+                    notes.append("· 已避开共同忌口：" + "、".join(gmeta["avoided_dislikes"][:8]))
+                elif gmeta.get("relaxed_dislikes"):
+                    notes.append("· 忌口交集较严，已优先保证全员零过敏原")
+                if gmeta.get("shared_likes"):
+                    notes.append("· 口味共鸣加权：" + "、".join(gmeta["shared_likes"][:6]))
+                group_reply = "\n".join(notes)
+                if self.taste_memory.enabled and user_id:
+                    await asyncio.to_thread(
+                        self.taste_memory.record_recommendation,
+                        user_id,
+                        food,
+                        group_id=str(group_id or ""),
+                        nickname=nickname,
+                    )
+                sig_cb = getattr(self, "signal_callback", None)
+                if callable(sig_cb):
+                    try:
+                        await sig_cb(
+                            umo=umo,
+                            signal_type="what_to_eat",
+                            summary=f"{len(group_uids)} 位群友合选聚餐敲定【{food}】"
+                            + (
+                                f"（共同偏好：{'、'.join(gmeta['shared_likes'][:4])}）"
+                                if gmeta.get("shared_likes")
+                                else ""
+                            ),
+                            participants=[
+                                {
+                                    "uid": u,
+                                    "name": self.taste_memory.get_profile(u).nickname or u,
+                                }
+                                for u in group_uids
+                            ],
+                            metadata={"food": food, "shared_likes": gmeta.get("shared_likes") or []},
+                            mood_hint="warm",
+                        )
+                    except Exception:
+                        pass
+                image_path = self.image_manager.get_random_image(food) if food else None
+                if image_path:
+                    yield event.make_result().message(group_reply).file_image(image_path)
+                else:
+                    yield event.plain_result(group_reply)
+                event.stop_event()
+                return
+
             taste_summary = None
             if self.taste_memory.enabled and user_id:
                 await asyncio.to_thread(
@@ -516,6 +622,31 @@ class WhatToEatPlugin(Component):
         return ""
 
     @staticmethod
+    def _extract_peer_mentions(event: AstrMessageEvent, *, sender_id: str = "") -> list[str]:
+        """Extract mentioned non-bot peer user IDs for multi-user group meal selection."""
+        bot_id = ""
+        try:
+            bot_id = str(event.get_self_id() or "").strip()
+        except Exception:
+            bot_id = ""
+        try:
+            messages = event.get_messages() or []
+        except Exception:
+            message_obj = getattr(event, "message_obj", None)
+            messages = getattr(message_obj, "message", None) or []
+        peers: list[str] = []
+        seen = {str(sender_id or "").strip(), bot_id, "all", "0", ""}
+        for comp in messages:
+            if isinstance(comp, At):
+                qq = str(
+                    getattr(comp, "qq", "") or getattr(comp, "user_id", "") or ""
+                ).strip()
+                if qq not in seen:
+                    seen.add(qq)
+                    peers.append(qq)
+        return peers
+
+    @staticmethod
     def _looks_like_taste_command(text: str) -> bool:
         t = (text or "").strip()
         if not t:
@@ -568,7 +699,8 @@ class WhatToEatPlugin(Component):
         recent = profile.recent_foods(8)
         lines.append("最近推荐：" + ("、".join(recent) if recent else "（还没有）"))
         lines.append("")
-        lines.append("设置：喜欢吃 / 不吃 / 过敏 …")
+        lines.append("设置：喜欢吃 / 不吃 / 过敏 / 口味 删除 <项>")
+        lines.append("多人合选：@群友 一起吃什么（自动取全员安全交集）")
         lines.append("也可直接说「我不吃香菜」「我喜欢麻辣烫」")
         lines.append("对推荐反馈「好吃」「换一个」也会记住")
         return "\n".join(lines)

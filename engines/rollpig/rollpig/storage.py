@@ -179,8 +179,15 @@ class BoardStore:
 
     def _load_unlocked(self, day: str) -> DailyBoard:
         raw = self._read_unlocked()
-        if not isinstance(raw, Mapping) or raw.get("date") != day:
+        if not isinstance(raw, Mapping):
             return DailyBoard.empty(day)
+        if raw.get("date") != day:
+            prev_collections = (
+                raw.get("collections")
+                if isinstance(raw.get("collections"), Mapping)
+                else None
+            )
+            return DailyBoard.empty(day, collections=prev_collections)
         return DailyBoard.from_mapping(raw, day)
 
     def _read(self) -> Any:

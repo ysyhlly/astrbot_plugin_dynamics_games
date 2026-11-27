@@ -96,6 +96,7 @@ async def sync_outcome_to_chronicle(
     valuable: bool,
     importance: int = 1,
     admission_mode: str = "auto",
+    image_path: str = "",
     timeout: float = DEFAULT_BRIDGE_TIMEOUT,
 ) -> dict[str, Any]:
     """Submit a verified, completed, valuable outcome to Group Chronicle.
@@ -193,6 +194,8 @@ async def sync_outcome_to_chronicle(
         "event_at": float(activity.get("completed_at") or time.time()),
         "admission_preference": "pending" if (admission_mode == "pending" or has_risk) else "approved",
     }
+    if str(image_path or "").strip():
+        outcome_payload["image_path"] = str(image_path).strip()
 
     record_fn = getattr(plugin, "record_valuable_outcome", None)
     if callable(record_fn):

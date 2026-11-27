@@ -63,14 +63,17 @@ def build_help_text(module_states: dict[str, bool] | None = None) -> str:
         "· /活动 开始 [编号] — 结束招募进入正式阶段",
         "· /活动 阶段 [编号] [自定义阶段名] — 推进到下一阶段",
         "· /活动 打卡 <内容> / /活动 提交 <内容> — 提交共读笔记/挑战打卡/接龙下一棒/作品片段",
-        "· /活动 完结 [编号] [结项总结] — 完结定稿：生成成果册、经历存入「群间记忆」、达标成果入「群史记」",
+        "· /活动 撤回 [编号] / /活动 改绑 <目标编号> — 误投后撤回最近一条记录或改绑至目标活动",
+        "· /活动 移交 [编号] <@新发起人|昵称> — 发起人或管理员移交活动主持权",
+        "· /活动 配图 [编号] — 为活动生成图文画报（联动视觉工坊，无配图引擎自动降级精致文字画报）",
+        "· /活动 完结 [编号] [结项总结] — 完结定稿：生成图文画报与成果册、经历存「群间记忆」、达标入「群史记」",
         "· /活动 成果 [编号] — 查看已完结活动的汇编作品全文",
         "· /活动 取消 [编号] [原因] — 取消或流局（流局不入群史记）",
         "· /活动 清理 [小时] — 群管理员手动清理超时未推进的滞留活动",
         "",
         "【快捷入口】",
-        "· /共读 <书名或笔记> · /约局 <游戏名或集合信息> · /接龙 <主题或下一棒> · /挑战 <目标或打卡> · /共创 <作品名或片段>",
-        "· 以上快捷入口均支持 `发起/报名/退出/开始/阶段/打卡/列表/详情/完结/取消/成果/帮助` 子指令（如 `/共创 发起 <标题>`）",
+        "· /共读 <书名或笔记> · /约局 <游戏名或集合信息>（支持 `/约局 摇人 [游戏名]` 联动 Steam） · /接龙 <主题或下一棒> · /挑战 <目标或打卡> · /共创 <作品名或片段>",
+        "· 以上快捷入口均支持 `发起/报名/退出/开始/阶段/打卡/撤回/改绑/移交/配图/列表/详情/完结/取消/成果/帮助` 子指令（如 `/共创 发起 <标题>`）",
         "· /活动 娱乐 — 查看已整合的全部娱乐与小游戏模块（真心话 / 21点 / 今日小猪 / 吃什么 / Steam 监控）",
         "· /steam help — 查看 Steam 状态监控、自然日时长排行、成就推送与商店查价指令",
     ]
@@ -183,12 +186,30 @@ async def handle_create_command(
     if not ok or act is None:
         return msg
     cat = CATEGORIES[act["category"]]
+    steam_rally_hint = ""
+    if act["category"] == "matchmaking":
+        coop = await coordinator.find_steam_coop_players(umo, gid, title)
+        playing_now = coop.get("playing_now") or []
+        recent_players = coop.get("recent_players") or []
+        hints: list[str] = []
+        if playing_now:
+            names = "、".join(
+                f"{p['name']}({p['game_name']})" if p.get("game_name") else str(p["name"])
+                for p in playing_now[:6]
+            )
+            hints.append(f"在线游玩中：{names}")
+        if recent_players:
+            names = "、".join(str(p["name"]) for p in recent_players[:6])
+            hints.append(f"近期玩过：{names}")
+        if hints:
+            steam_rally_hint = f"\n🎮 Steam 同好可摇人：{'；'.join(hints)}（发送 `/约局 摇人` 查看详情）"
     return (
         f"{cat['icon']} 已发起{cat['label']}：《{act['title']}》 [编号 `{act['id']}`]\n"
         f"发起人：{name}（已自动报名）\n"
         f"阶段规划：{' → '.join(act['stages'])}\n"
         + (f"说明：{act['description']}\n" if act.get("description") else "")
         + f"\n群友发送 `/活动 报名 {act['id']}` 即可加入，发送 `/活动 提交 <内容>` 推进进度！"
+        + steam_rally_hint
     )
 
 
@@ -318,23 +339,25 @@ async def handle_stage_command(
     )
 
 
-async def handle_submit_command(
+async def handle_submit_with_media(
     coordinator: ActivityCoordinator,
     event: Any,
     raw_args: str = "",
     *,
     category_hint: str = "",
     kind: str = "checkin",
-) -> str:
+) -> tuple[str, str]:
     umo, gid, uid, name, _ = extract_group_and_sender(event)
     if not gid:
-        return "请在群聊中提交活动进度。"
+        return "请在群聊中提交活动进度。", ""
     act_id, content = _split_optional_id(raw_args)
+    explicit_id = bool(act_id)
     if not content and act_id and not act_id.upper().startswith(("G", "M")):
         content = raw_args.strip()
         act_id = ""
+        explicit_id = False
     if not content:
-        return "请附上打卡或提交内容，例如：`/活动 提交 第一章读完，印象最深的是星际列车那段`"
+        return "请附上打卡或提交内容，例如：`/活动 提交 第一章读完，印象最深的是星际列车那段`", ""
 
     ok, msg, act, total = await coordinator.submit_progress(
         umo=umo,
@@ -347,7 +370,23 @@ async def handle_submit_command(
         message_id=extract_message_id(event),
     )
     if not ok or act is None:
-        return msg
+        return msg, ""
+
+    multi_tip = ""
+    if not explicit_id:
+        open_acts = await asyncio.to_thread(
+            coordinator.store.list_activities,
+            umo=umo,
+            category=category_hint,
+            status="open",
+            limit=3,
+        )
+        if len(open_acts) > 1:
+            multi_tip = (
+                f"\n💡 本群同时有多个进行中活动，已优先归入 `{act['id']}`《{act['title']}》；"
+                f"若投错可发 `/活动 撤回` 或 `/活动 改绑 <目标编号>`。"
+            )
+
     target = max(1, int(act["target_count"]))
     pct = min(100, round(total * 100 / target))
     milestone = (
@@ -355,17 +394,47 @@ async def handle_submit_command(
         if total >= target
         else ""
     )
-    return (
-        f"📝 已记录 {name} 在《{act['title']}》[{act['id']} · {act['current_stage']}] 的第 {total} 条内容（总进度 {total}/{target}，{pct}%）！{milestone}"
+    illust_path = ""
+    illust_note = ""
+    if act.get("category") == "relay":
+        illust = await coordinator.maybe_generate_relay_illustration(
+            act, total, name, content
+        )
+        if illust and illust.get("image_path"):
+            illust_path = str(illust["image_path"])
+            illust_note = f"\n🎨 已为第 {total} 棒自动生成接龙连环画插画！"
+
+    text = (
+        f"📝 已记录 {name} 在《{act['title']}》[{act['id']} · {act['current_stage']}] 的第 {total} 条内容（总进度 {total}/{target}，{pct}%）！"
+        f"{milestone}{illust_note}{multi_tip}"
     )
+    return text, illust_path
 
 
-async def handle_complete_command(
-    coordinator: ActivityCoordinator, event: Any, raw_args: str = ""
+async def handle_submit_command(
+    coordinator: ActivityCoordinator,
+    event: Any,
+    raw_args: str = "",
+    *,
+    category_hint: str = "",
+    kind: str = "checkin",
 ) -> str:
+    text, _ = await handle_submit_with_media(
+        coordinator,
+        event,
+        raw_args,
+        category_hint=category_hint,
+        kind=kind,
+    )
+    return text
+
+
+async def handle_complete_with_media(
+    coordinator: ActivityCoordinator, event: Any, raw_args: str = ""
+) -> tuple[str, str]:
     umo, gid, uid, _, is_admin = extract_group_and_sender(event)
     if not gid:
-        return "请在群聊中完结活动。"
+        return "请在群聊中完结活动。", ""
     act_id, closing_note = _split_optional_id(raw_args)
     ok, sync_report, outcome = await coordinator.complete_activity(
         umo=umo,
@@ -375,13 +444,171 @@ async def handle_complete_command(
         closing_note=closing_note,
     )
     if not ok or outcome is None:
-        return sync_report
-    return (
+        return sync_report, ""
+    poster_path = str(outcome.get("poster_path") or "").strip()
+    poster_line = "\n· 图文画报：已生成纪念画报卡片并附带归档。" if poster_path else ""
+    text = (
         f"🎊 恭喜完结！{outcome['category_icon']}《{outcome['title']}》[{outcome['activity_id']}] 已正式定稿！\n"
         f"· 参与人数：{outcome['stats'].get('participant_count', 1)} 人 ｜ 累计贡献：{outcome['stats'].get('contribution_count', 0)} 条\n"
-        f"· 归档联动：{sync_report}\n"
+        f"· 归档联动：{sync_report}{poster_line}\n"
         f"· 发送 `/活动 成果 {outcome['activity_id']}` 可随时阅览完整汇编作品。"
     )
+    return text, poster_path
+
+
+async def handle_complete_command(
+    coordinator: ActivityCoordinator, event: Any, raw_args: str = ""
+) -> str:
+    text, _ = await handle_complete_with_media(coordinator, event, raw_args)
+    return text
+
+
+async def handle_poster_command(
+    coordinator: ActivityCoordinator, event: Any, activity_id: str = ""
+) -> tuple[str, str]:
+    umo, gid, uid, _, _ = extract_group_and_sender(event)
+    if not gid:
+        return "请在群聊中生成活动配图画报。", ""
+    clean_id = activity_id.strip()
+    if not clean_id:
+        act = await asyncio.to_thread(
+            coordinator.store.resolve_active_activity, umo, "", "", preferred_uid=uid
+        )
+        if act is not None:
+            clean_id = act["id"]
+        else:
+            recent = await asyncio.to_thread(
+                coordinator.store.list_outcomes, umo=umo, limit=1
+            )
+            if recent:
+                clean_id = recent[0]["activity_id"]
+    if not clean_id:
+        return "未找到可生成画报的活动。可发送 `/活动 列表` 查看活动编号。", ""
+    res = await coordinator.generate_activity_poster(clean_id, umo=umo)
+    if not res.get("ok") or not res.get("image_path"):
+        return f"画报生成失败：{res.get('error') or '请稍后再试'}", ""
+    act = res["activity"]
+    src_note = (
+        "视觉工坊 AI 封面 + 精致画报"
+        if res.get("artwork_source") == "visual_media"
+        else "群间精致文本画报"
+    )
+    return (
+        f"🖼️ 已为 {act['category_icon']}《{act['title']}》[{act['id']}] 生成画报（{src_note}）：",
+        str(res["image_path"]),
+    )
+
+
+async def handle_withdraw_command(
+    coordinator: ActivityCoordinator, event: Any, raw_args: str = ""
+) -> str:
+    umo, gid, uid, _, is_admin = extract_group_and_sender(event)
+    if not gid:
+        return "请在群聊中撤回活动记录。"
+    act_id, _ = _split_optional_id(raw_args)
+    _, msg, _ = await coordinator.withdraw_contribution(
+        umo=umo, uid=uid, activity_id=act_id, is_admin=is_admin
+    )
+    return msg
+
+
+async def handle_rebind_command(
+    coordinator: ActivityCoordinator, event: Any, raw_args: str = ""
+) -> str:
+    umo, gid, uid, _, is_admin = extract_group_and_sender(event)
+    if not gid:
+        return "请在群聊中改绑活动记录。"
+    target_id, rest = _split_optional_id(raw_args)
+    if not target_id:
+        target_id = rest.strip()
+    _, msg, _ = await coordinator.rebind_contribution(
+        umo=umo, uid=uid, target_activity_id=target_id, is_admin=is_admin
+    )
+    return msg
+
+
+def _extract_first_at_uid(event: Any) -> str:
+    try:
+        messages = event.get_messages() or []
+    except Exception:
+        msg_obj = getattr(event, "message_obj", None)
+        messages = getattr(msg_obj, "message", None) or []
+    bot_id = ""
+    try:
+        bot_id = str(event.get_self_id() or "").strip()
+    except Exception:
+        bot_id = ""
+    for comp in messages:
+        qq = str(getattr(comp, "qq", "") or getattr(comp, "user_id", "") or "").strip()
+        if qq and qq not in ("all", "0") and (not bot_id or qq != bot_id):
+            return qq
+    return ""
+
+
+async def handle_transfer_command(
+    coordinator: ActivityCoordinator, event: Any, raw_args: str = ""
+) -> str:
+    umo, gid, uid, _, is_admin = extract_group_and_sender(event)
+    if not gid:
+        return "请在群聊中移交活动发起人。"
+    act_id, rest = _split_optional_id(raw_args)
+    at_uid = _extract_first_at_uid(event)
+    clean_rest = rest.strip()
+    # If act_id looked numeric (e.g. a QQ UID when no activity ID was passed), treat it as target UID
+    if act_id and act_id.isdigit() and not clean_rest and not at_uid:
+        if await asyncio.to_thread(coordinator.store.get_activity, act_id, umo=umo) is None:
+            clean_rest = act_id
+            act_id = ""
+    target_uid = at_uid or clean_rest.lstrip("@").strip()
+    target_name = ""
+    if at_uid and clean_rest and clean_rest.lstrip("@").strip() != at_uid:
+        target_name = clean_rest.lstrip("@").strip()
+    if not target_uid:
+        return "用法：`/活动 移交 [活动编号] <@新发起人|UID|已报名昵称>`"
+    _, msg, _ = await coordinator.transfer_creator(
+        umo=umo,
+        actor_uid=uid,
+        is_admin=is_admin,
+        new_creator_uid=target_uid,
+        new_creator_name=target_name,
+        activity_id=act_id,
+    )
+    return msg
+
+
+async def handle_steam_rally_command(
+    coordinator: ActivityCoordinator, event: Any, game_query: str = ""
+) -> str:
+    umo, gid, _, _, _ = extract_group_and_sender(event)
+    if not gid:
+        return "请在群聊中使用 `/约局 摇人`。"
+    coop = await coordinator.find_steam_coop_players(umo, gid, game_query.strip())
+    if not coop.get("available"):
+        return "Steam 状态监控模块当前未启用或暂无本群监控数据。"
+    playing_now = coop.get("playing_now") or []
+    recent_players = coop.get("recent_players") or []
+    coop_groups = coop.get("coop_groups") or {}
+
+    lines = [
+        f"🎮 Steam 开黑摇人名单" + (f"（筛选：{game_query.strip()}）" if game_query.strip() else "")
+    ]
+    if coop_groups:
+        lines.append("【当前多人同玩热点】")
+        for gname, members in list(coop_groups.items())[:5]:
+            names = "、".join(str(m["name"]) for m in members)
+            lines.append(f"· 《{gname}》（{len(members)}人在线）：{names}")
+    if playing_now:
+        lines.append("【当前在线游玩中】")
+        for p in playing_now[:10]:
+            mins = max(1, int(round(float(p.get("duration_sec") or 0) / 60)))
+            lines.append(f"· {p['name']} — 正在玩《{p['game_name']}》（已玩 {mins} 分钟）")
+    if recent_players:
+        names = "、".join(str(p["name"]) for p in recent_players[:10])
+        lines.append(f"【近期玩过同游戏】{names}")
+    if len(lines) == 1:
+        return "本群当前暂无匹配的 Steam 在线或近期游玩玩家，可直接发送 `/约局 发起 <游戏名>` 公开招募！"
+    lines.append("发送 `/约局 发起 <游戏名>` 即可一键开团并在局后自动汇总 Steam 战报！")
+    return "\n".join(lines)
 
 
 async def handle_cancel_command(
@@ -486,34 +713,38 @@ def _build_shortcut_help_text(category_key: str) -> str:
     )
 
 
-async def handle_category_shortcut(
+async def handle_category_shortcut_with_media(
     coordinator: ActivityCoordinator,
     event: Any,
     category_key: str,
     raw_args: str = "",
     *,
     module_states: dict[str, bool] | None = None,
-) -> str:
-    """Smart shortcut for /共读, /约局, /接龙, /挑战, /共创."""
-    umo, gid, _, _, _ = extract_group_and_sender(event)
+) -> tuple[str, str]:
+    """Smart shortcut returning ``(text, optional_image_path)`` for /共读, /约局, /接龙, /挑战, /共创."""
+    umo, gid, uid, _, _ = extract_group_and_sender(event)
     cat = CATEGORIES[category_key]
     cmd = _shortcut_cmd_name(category_key)
     if not gid:
-        return f"请在群聊中使用 `/{cmd}` 指令。"
+        return f"请在群聊中使用 `/{cmd}` 指令。", ""
 
     text = str(raw_args or "").strip()
     active = await asyncio.to_thread(
-        coordinator.store.resolve_active_activity, umo, "", category_key
+        coordinator.store.resolve_active_activity,
+        umo,
+        "",
+        category_key,
+        preferred_uid=uid,
     )
     if not text:
         if active:
-            return await handle_detail_command(coordinator, event, active["id"])
+            return await handle_detail_command(coordinator, event, active["id"]), ""
         return (
             f"{cat['icon']} 当前没有进行中的{cat['label']}。\n"
             f"· 发起：`/{cmd} 发起 <标题> [说明]`（或 `/活动 发起 {cmd} <标题>`）\n"
             f"· 报名：`/{cmd} 报名` ｜ 列表：`/{cmd} 列表` ｜ 帮助：`/{cmd} 帮助`\n"
             f"· 打卡/续写：`/{cmd} <内容>`"
-        )
+        ), ""
 
     parts = text.split(None, 1)
     sub = parts[0]
@@ -529,7 +760,7 @@ async def handle_category_shortcut(
         return None
 
     if sub_lower in ("帮助", "help", "说明", "?", "？"):
-        return _build_shortcut_help_text(category_key)
+        return _build_shortcut_help_text(category_key), ""
 
     if sub_lower in ("娱乐", "arcade", "modules", "模块", "小游戏"):
         states = (
@@ -537,16 +768,35 @@ async def handle_category_shortcut(
             if module_states is not None
             else {item["key"]: True for item in ENGINE_CATALOG}
         )
-        return build_arcade_text(states)
+        return build_arcade_text(states), ""
 
     if sub_lower in ("列表", "list", "全部"):
-        return await handle_list_command(coordinator, event)
+        return await handle_list_command(coordinator, event), ""
 
     if sub_lower in ("成果", "导出", "outcome", "result", "export", "查看成果"):
-        return await handle_outcome_command(coordinator, event, rest)
+        return await handle_outcome_command(coordinator, event, rest), ""
+
+    if sub_lower in ("配图", "画报", "poster", "封面"):
+        target_id = rest or (active["id"] if active else "")
+        return await handle_poster_command(coordinator, event, target_id)
+
+    if sub_lower in ("撤回", "withdraw", "undo", "撤销"):
+        target_arg = _target_for_active(rest) if rest or active else ""
+        return await handle_withdraw_command(coordinator, event, target_arg or ""), ""
+
+    if sub_lower in ("改绑", "rebind", "转移打卡", "换绑"):
+        return await handle_rebind_command(coordinator, event, rest), ""
+
+    if sub_lower in ("移交", "转让", "transfer", "换房主"):
+        target_arg = _target_for_active(rest) if active and not _split_optional_id(rest)[0] else rest
+        return await handle_transfer_command(coordinator, event, target_arg or rest), ""
+
+    if sub_lower in ("摇人", "拉人", "rally", "同好"):
+        query = rest or (active["title"] if active and category_key == "matchmaking" else "")
+        return await handle_steam_rally_command(coordinator, event, query), ""
 
     if sub_lower in ("清理", "cleanup", "prune"):
-        return await handle_cleanup_command(coordinator, event, rest)
+        return await handle_cleanup_command(coordinator, event, rest), ""
 
     if sub_lower in ("发起", "创建", "新建", "开始新", "new", "create"):
         tokens = split_tokens(rest)
@@ -555,9 +805,12 @@ async def handle_category_shortcut(
             if resolved_first and resolved_first != "mini_game" and (
                 category_key == "creation" or resolved_first == category_key
             ):
-                return await handle_create_command(coordinator, event, rest)
-        return await handle_create_command(
-            coordinator, event, f"{category_key} {rest}".strip()
+                return await handle_create_command(coordinator, event, rest), ""
+        return (
+            await handle_create_command(
+                coordinator, event, f"{category_key} {rest}".strip()
+            ),
+            "",
         )
 
     if sub_lower in ("报名", "加入", "上车", "join", "signup"):
@@ -565,50 +818,72 @@ async def handle_category_shortcut(
         if target_arg is None:
             return (
                 f"当前没有正在招募或进行中的{cat['label']}。"
-                f"可先发送 `/{cmd} 发起 <标题>` 创建，或使用 `/活动 报名 <编号>`。"
+                f"可先发送 `/{cmd} 发起 <标题>` 创建，或使用 `/活动 报名 <编号>`。",
+                "",
             )
-        return await handle_join_command(coordinator, event, target_arg)
+        return await handle_join_command(coordinator, event, target_arg), ""
 
     if sub_lower in ("退出", "leave", "跳车"):
         target_arg = _target_for_active(rest)
         if target_arg is None:
-            return f"当前没有可退出的进行中{cat['label']}。如需退出其他活动请使用 `/活动 退出 <编号>`。"
-        return await handle_leave_command(coordinator, event, target_arg)
+            return (
+                f"当前没有可退出的进行中{cat['label']}。如需退出其他活动请使用 `/活动 退出 <编号>`。",
+                "",
+            )
+        return await handle_leave_command(coordinator, event, target_arg), ""
 
     if sub_lower in ("开始", "start", "发车"):
         target_arg = _target_for_active(rest)
         if target_arg is None:
-            return f"当前没有待开始的{cat['label']}，请先发送 `/{cmd} 发起 <标题>` 创建。"
-        return await handle_stage_command(
-            coordinator, event, target_arg, start_only=True
+            return (
+                f"当前没有待开始的{cat['label']}，请先发送 `/{cmd} 发起 <标题>` 创建。",
+                "",
+            )
+        return (
+            await handle_stage_command(
+                coordinator, event, target_arg, start_only=True
+            ),
+            "",
         )
 
     if sub_lower in ("阶段", "推进", "下一阶段", "advance", "next", "stage"):
         target_arg = _target_for_active(rest)
         if target_arg is None:
-            return f"当前没有进行中的{cat['label']}，无法推进阶段。"
-        return await handle_stage_command(
-            coordinator, event, target_arg, start_only=False
+            return f"当前没有进行中的{cat['label']}，无法推进阶段。", ""
+        return (
+            await handle_stage_command(
+                coordinator, event, target_arg, start_only=False
+            ),
+            "",
         )
 
     if sub_lower in ("状态", "详情", "进度", "status", "info"):
         if rest:
-            return await handle_detail_command(coordinator, event, rest)
+            return await handle_detail_command(coordinator, event, rest), ""
         if active:
-            return await handle_detail_command(coordinator, event, active["id"])
-        return f"{cat['icon']} 当前没有进行中的{cat['label']}。可发送 `/活动 列表` 查看本群全部活动。"
+            return await handle_detail_command(coordinator, event, active["id"]), ""
+        return (
+            f"{cat['icon']} 当前没有进行中的{cat['label']}。可发送 `/活动 列表` 查看本群全部活动。",
+            "",
+        )
 
     if sub_lower in ("完结", "定稿", "结算", "finish", "complete", "done"):
         target_arg = _target_for_active(rest)
         if target_arg is None:
-            return f"当前没有可完结的进行中{cat['label']}。如需完结其他活动请使用 `/活动 完结 <编号>`。"
-        return await handle_complete_command(coordinator, event, target_arg)
+            return (
+                f"当前没有可完结的进行中{cat['label']}。如需完结其他活动请使用 `/活动 完结 <编号>`。",
+                "",
+            )
+        return await handle_complete_with_media(coordinator, event, target_arg)
 
     if sub_lower in ("取消", "流局", "cancel", "abort"):
         target_arg = _target_for_active(rest)
         if target_arg is None:
-            return f"当前没有可取消的进行中{cat['label']}。如需取消其他活动请使用 `/活动 取消 <编号>`。"
-        return await handle_cancel_command(coordinator, event, target_arg)
+            return (
+                f"当前没有可取消的进行中{cat['label']}。如需取消其他活动请使用 `/活动 取消 <编号>`。",
+                "",
+            )
+        return await handle_cancel_command(coordinator, event, target_arg), ""
 
     if sub_lower in (
         "打卡",
@@ -623,13 +898,20 @@ async def handle_category_shortcut(
     ):
         target_arg = _target_for_active(rest)
         if target_arg is None:
-            return f"当前没有进行中的{cat['label']}，请先发送 `/{cmd} 发起 <标题>` 创建。"
+            return (
+                f"当前没有进行中的{cat['label']}，请先发送 `/{cmd} 发起 <标题>` 创建。",
+                "",
+            )
         submit_kind = (
             "relay_turn"
             if category_key == "relay"
-            else ("submission" if sub_lower in ("提交", "续写", "submit", "contribute", "下一棒") else "checkin")
+            else (
+                "submission"
+                if sub_lower in ("提交", "续写", "submit", "contribute", "下一棒")
+                else "checkin"
+            )
         )
-        return await handle_submit_command(
+        return await handle_submit_with_media(
             coordinator,
             event,
             target_arg,
@@ -640,13 +922,33 @@ async def handle_category_shortcut(
     # If there is already an active activity of this category, treat bare text as a contribution/turn;
     # otherwise treat bare text as creating a new activity!
     if active:
-        return await handle_submit_command(
+        return await handle_submit_with_media(
             coordinator,
             event,
             f"{active['id']} {text}",
             category_hint=category_key,
             kind="relay_turn" if category_key == "relay" else "checkin",
         )
-    return await handle_create_command(
-        coordinator, event, f"{category_key} {text}"
+    return (
+        await handle_create_command(coordinator, event, f"{category_key} {text}"),
+        "",
     )
+
+
+async def handle_category_shortcut(
+    coordinator: ActivityCoordinator,
+    event: Any,
+    category_key: str,
+    raw_args: str = "",
+    *,
+    module_states: dict[str, bool] | None = None,
+) -> str:
+    """Smart shortcut for /共读, /约局, /接龙, /挑战, /共创."""
+    text, _ = await handle_category_shortcut_with_media(
+        coordinator,
+        event,
+        category_key,
+        raw_args,
+        module_states=module_states,
+    )
+    return text

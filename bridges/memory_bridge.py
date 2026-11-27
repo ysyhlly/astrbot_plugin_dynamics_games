@@ -133,6 +133,7 @@ async def sync_experience_to_memory(
     participants: list[dict[str, Any]],
     source_refs: list[dict[str, Any]] | None = None,
     occurred_at: float | None = None,
+    image_path: str = "",
     timeout: float = DEFAULT_BRIDGE_TIMEOUT,
 ) -> dict[str, Any]:
     """Write a group activity through Dynamics Memory's source-validating API."""
@@ -166,6 +167,8 @@ async def sync_experience_to_memory(
         "source_refs": (source_refs or [])[:32],
         "occurred_at": ts,
     }
+    if str(image_path or "").strip():
+        payload["image_path"] = str(image_path).strip()
 
     record_fn = getattr(plugin, "record_activity_experience", None)
     if not callable(record_fn):

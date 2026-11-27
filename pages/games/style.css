@@ -489,6 +489,41 @@ code {
 }
 .engine-card.off { opacity: .78; background: var(--surface-soft); }
 .cmd-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.scope-hint-bar {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 13px;
+}
+.steam-console-card { margin-top: 18px; }
+.steam-bind-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+.steam-groups-list { display: flex; flex-direction: column; gap: 12px; }
+.steam-group-row {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+.steam-switches { display: flex; flex-wrap: wrap; gap: 6px; }
+.steam-switches button { cursor: pointer; }
+.steam-player-chip { display: inline-flex; align-items: center; gap: 6px; }
+.chip-del-btn {
+  padding: 1px 6px;
+  font-size: 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--danger);
+  cursor: pointer;
+}
 
 .empty {
   padding: 28px 18px;

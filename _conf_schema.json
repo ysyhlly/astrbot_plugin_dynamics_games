@@ -53,6 +53,24 @@
         "description": "超时未推进活动自动流局清理（小时，0 关闭）",
         "type": "int",
         "default": 168
+      },
+      "stale_reminder_hours": {
+        "description": "活动临期到期前提醒（小时，0 关闭）",
+        "type": "int",
+        "default": 24,
+        "hint": "距离自动流局清理前 N 小时发送一次催更/结项提醒（遵循静默时段）。"
+      },
+      "poster_on_complete": {
+        "description": "协作活动完结自动生成图文画报",
+        "type": "bool",
+        "default": true,
+        "hint": "完结时联动视觉工坊生成封面插画并合成可转发长图画报，无视觉工坊或超额时自动降级 Pillow 精致画报。"
+      },
+      "relay_illustration_interval": {
+        "description": "故事接龙自动配插画间隔（每 N 棒，0 关闭）",
+        "type": "int",
+        "default": 3,
+        "hint": "故事接龙每满 N 棒自动生成一幅连环画插画卡片。"
       }
     }
   },
@@ -84,6 +102,11 @@
         "description": "启用「Steam 状态监控」群友游戏监控、成就、时长排行与商店查价",
         "type": "bool",
         "default": true
+      },
+      "per_group_modules": {
+        "description": "分群娱乐引擎开关覆盖（按 UMO 映射模块启停，由控制台维护）",
+        "type": "object",
+        "default": {}
       }
     }
   },
@@ -280,6 +303,22 @@
         "type": "bool",
         "hint": "启用后牌堆加入小王/大王。抽牌权重：普通牌=1，小丑=当前轮数（开局为0必不抽到）。小王拆其他人最小牌、大王拆最大牌并解除停牌；拆掉的牌进弃牌堆",
         "default": false
+      },
+      "penalty_mode": {
+        "description": "结算惩罚模式",
+        "type": "string",
+        "options": [
+          "auto",
+          "soft",
+          "mute"
+        ],
+        "labels": [
+          "自动（OneBot 有权限禁言，否则自动转趣味软惩罚）",
+          "趣味软惩罚（临时称呼 / 强制真心话 / 败北卡片）",
+          "严格禁言模式（仅 OneBot 禁言）"
+        ],
+        "default": "auto",
+        "hint": "非 OneBot 或无管理员权限的群聊建议保持 auto 或 soft，避免刷屏权限不足。"
       }
     }
   },

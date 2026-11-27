@@ -198,10 +198,30 @@
           <div class="toolbar">
             <div>
               <h2 data-series-text="群聊娱乐引擎总控">群聊娱乐引擎总控</h2>
-              <p class="muted" data-series-text="四大群聊娱乐插件已内聚至「群间游戏」，100% 保留原有群指令与历史数据目录，支持按需独立启停。">四大群聊娱乐插件已内聚至「群间游戏」，100% 保留原有群指令与历史数据目录，支持按需独立启停。</p>
+              <p class="muted" data-series-text="五大群聊娱乐插件已内聚至「群间游戏」，100% 保留原有群指令与历史数据目录，支持全局及按群独立启停。">五大群聊娱乐插件已内聚至「群间游戏」，100% 保留原有群指令与历史数据目录，支持全局及按群独立启停。</p>
             </div>
+            <button id="steam-panel-refresh-btn" type="button" data-series-text="刷新 Steam 监控面板">刷新 Steam 监控面板</button>
           </div>
+          <div id="engines-scope-banner" class="scope-hint-bar" hidden></div>
           <div id="engine-grid" class="engine-grid"></div>
+
+          <article id="steam-console-card" class="card steam-console-card">
+            <div class="card-top">
+              <div>
+                <h3 data-series-text="Steam 监控管理子面板">Steam 监控管理子面板</h3>
+                <p class="muted" data-series-text="集中管理各群 Steam 状态推送、成就推送与每日排行日报开关，并支持玩家 SteamID 绑定与解绑。">集中管理各群 Steam 状态推送、成就推送与每日排行日报开关，并支持玩家 SteamID 绑定与解绑。</p>
+              </div>
+              <span id="steam-runtime-badge" class="badge neutral" data-series-text="加载中">加载中</span>
+            </div>
+            <form id="steam-bind-form" class="steam-bind-form">
+              <input id="steam-bind-gid" type="text" placeholder="目标群号（可选，填则同步加入群监控）" data-series-placeholder="目标群号（可选，填则同步加入群监控）">
+              <input id="steam-bind-sid" type="text" placeholder="64位 SteamID（必填）" required data-series-placeholder="64位 SteamID（必填）">
+              <input id="steam-bind-qq" type="text" placeholder="绑定 QQ 号（可选）" data-series-placeholder="绑定 QQ 号（可选）">
+              <input id="steam-bind-nick" type="text" placeholder="展示昵称（可选）" data-series-placeholder="展示昵称（可选）">
+              <button id="steam-bind-submit" type="submit" class="primary" data-series-text="绑定并加入监控">绑定并加入监控</button>
+            </form>
+            <div id="steam-groups-list" class="steam-groups-list"></div>
+          </article>
         </section>
       </main>
     </div>
