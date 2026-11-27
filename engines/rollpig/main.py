@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -108,14 +109,10 @@ class RollPigPlugin(Component):
             image_dir=resource_dir / "image",
             logger=self.logger,
         )
-        self.fonts = FontLibrary(font_dir, self.logger)
-        self.renderer = PigCardRenderer(
-            repository=self.repository,
-            fonts=self.fonts,
-            metrics=TextMetrics(),
-            spec=CanvasSpec(),
-            logger=self.logger,
-        )
+        self._font_dir = font_dir
+        self._fonts: FontLibrary | None = None
+        self._renderer: PigCardRenderer | None = None
+        self._render_init_lock = threading.Lock()
         self.service = RollPigService(
             BoardStore(data_dir / DATA_FILE_NAME, self.logger),
             self.repository,
@@ -123,6 +120,55 @@ class RollPigPlugin(Component):
         )
         self.presenter = PigPresenter(self.settings, self.logger)
         self.targeting = AtTargetResolver(self.settings)
+
+    @property
+    def fonts(self) -> FontLibrary:
+        cached = getattr(self, "_fonts", None)
+        if cached is not None:
+            return cached
+        lock = getattr(self, "_render_init_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._render_init_lock = lock
+        with lock:
+            if getattr(self, "_fonts", None) is None:
+                font_dir = getattr(self, "_font_dir", Path(__file__).parent / "resource" / "font")
+                self._fonts = FontLibrary(font_dir, self.logger)
+            return self._fonts
+
+    @fonts.setter
+    def fonts(self, value: FontLibrary | None) -> None:
+        self._fonts = value
+
+    @property
+    def renderer(self) -> PigCardRenderer:
+        cached = getattr(self, "_renderer", None)
+        if cached is not None:
+            return cached
+        lock = getattr(self, "_render_init_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._render_init_lock = lock
+        with lock:
+            if getattr(self, "_renderer", None) is None:
+                if getattr(self, "_fonts", None) is None:
+                    font_dir = getattr(self, "_font_dir", Path(__file__).parent / "resource" / "font")
+                    self._fonts = FontLibrary(font_dir, self.logger)
+                self._renderer = PigCardRenderer(
+                    repository=self.repository,
+                    fonts=self._fonts,
+                    metrics=TextMetrics(),
+                    spec=CanvasSpec(),
+                    logger=self.logger,
+                )
+            return self._renderer
+
+    @renderer.setter
+    def renderer(self, value: PigCardRenderer | None) -> None:
+        self._renderer = value
+
+    def _render_pig_card(self, pig: Pig) -> Path | None:
+        return self.renderer.render(pig)
 
     async def roll_pig(self, event: AstrMessageEvent):
         """抽取今日小猪"""
@@ -191,8 +237,8 @@ class RollPigPlugin(Component):
 
     async def _send_card(self, event: AstrMessageEvent, pig: Pig, user_id: str) -> None:
         """渲染并发送卡片；渲染或发送失败时降级为原始图片 + 文本。"""
-        # 图片合成是 CPU 密集操作，放到线程池避免阻塞事件循环
-        image_path = await asyncio.to_thread(self.renderer.render, pig)
+        # 图片合成（以及首次字体加载）是 CPU/IO 操作，放到线程池避免阻塞事件循环
+        image_path = await asyncio.to_thread(self._render_pig_card, pig)
         if image_path is not None and image_path.exists():
             try:
                 mention = self.presenter.should_mention(event)

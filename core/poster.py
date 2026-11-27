@@ -97,6 +97,63 @@ def _fit_artwork(image_path: str | Path, target_w: int, target_h: int) -> Image.
         return None
 
 
+MAX_POSTER_FILES = 100
+
+
+def prune_old_posters(
+    output_dir: Path | None = None,
+    *,
+    max_files: int = MAX_POSTER_FILES,
+    keep: Path | None = None,
+) -> int:
+    """Keep at most ``max_files`` image files in the posters directory (oldest evicted first)."""
+    target_dir = Path(output_dir) if output_dir is not None else _default_output_dir()
+    if not target_dir.is_dir():
+        return 0
+    cap = max(1, int(max_files))
+    keep_resolved = None
+    if keep is not None:
+        try:
+            keep_resolved = Path(keep).resolve()
+        except OSError:
+            keep_resolved = None
+    entries: list[tuple[float, Path]] = []
+    try:
+        for entry in target_dir.iterdir():
+            if not entry.is_file():
+                continue
+            if entry.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+                continue
+            try:
+                mtime = entry.stat().st_mtime
+            except OSError:
+                continue
+            entries.append((mtime, entry))
+    except OSError:
+        return 0
+
+    if len(entries) <= cap:
+        return 0
+    entries.sort(key=lambda item: item[0])
+    to_remove = len(entries) - cap
+    removed = 0
+    for _mtime, path in entries:
+        if removed >= to_remove:
+            break
+        if keep_resolved is not None:
+            try:
+                if path.resolve() == keep_resolved:
+                    continue
+            except OSError:
+                pass
+        try:
+            path.unlink(missing_ok=True)
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 def _default_output_dir() -> Path:
     try:
         from astrbot.api.star import StarTools
@@ -310,6 +367,7 @@ def render_activity_poster(
     ).hexdigest()[:10]
     out_path = out_dir / f"poster_{activity.get('id', 'act')}_{digest}.png"
     canvas.save(out_path, format="PNG")
+    prune_old_posters(out_dir, keep=out_path)
     return out_path
 
 
@@ -396,6 +454,7 @@ def render_relay_illustration_card(
     ).hexdigest()[:10]
     out_path = out_dir / f"relay_{activity.get('id', 'act')}_t{turn_number}_{digest}.png"
     canvas.save(out_path, format="PNG")
+    prune_old_posters(out_dir, keep=out_path)
     return out_path
 
 
@@ -452,6 +511,7 @@ def render_telephone_step_card(
     digest = hashlib.sha256(f"tel-step:{step_no}:{prompt_text}:{time.time_ns()}".encode()).hexdigest()[:10]
     out_path = out_dir / f"telephone_step_{step_no}_{digest}.png"
     canvas.save(out_path, format="PNG")
+    prune_old_posters(out_dir, keep=out_path)
     return out_path
 
 
@@ -556,6 +616,7 @@ def render_telephone_strip(
     digest = hashlib.sha256(f"tel-strip:{title}:{len(turns)}:{time.time_ns()}".encode()).hexdigest()[:10]
     out_path = out_dir / f"telephone_strip_{digest}.png"
     canvas.save(out_path, format="PNG")
+    prune_old_posters(out_dir, keep=out_path)
     return out_path
 
 
@@ -625,4 +686,5 @@ def render_pictionary_fallback_card(
     digest = hashlib.sha256(f"pic:{category}:{round_no}:{time.time_ns()}".encode()).hexdigest()[:10]
     out_path = out_dir / f"pictionary_r{round_no}_{digest}.png"
     canvas.save(out_path, format="PNG")
+    prune_old_posters(out_dir, keep=out_path)
     return out_path

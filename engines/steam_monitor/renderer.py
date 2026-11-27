@@ -12,9 +12,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from astrbot.api import logger
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from astrbot.api import logger
+try:
+    from ... import series_panels
+except Exception:  # pragma: no cover - standalone fallback
+    try:
+        import series_panels  # type: ignore[no-redef]
+    except Exception:
+        series_panels = None  # type: ignore[assignment]
 
 from .steam_client import sanitize_avatar_frame_url, sanitize_render_image_url
 
@@ -208,8 +215,11 @@ class SteamCardRenderer:
         self,
         html_render_fn: Callable | None = None,
         template_dir: Path | None = None,
+        *,
+        context: Any = None,
     ) -> None:
         self._html_render_fn = html_render_fn
+        self._context = context
         self._template_dir = Path(template_dir) if template_dir else _DEFAULT_TEMPLATE_DIR
         self._env = Environment(
             loader=FileSystemLoader(str(self._template_dir)),
@@ -310,6 +320,21 @@ class SteamCardRenderer:
         if self._html_render_fn is None:
             return None
 
+        # Check shared process memory watermark before invoking Playwright/Chromium
+        if series_panels is not None:
+            wm_fn = getattr(series_panels, "get_series_memory_watermark", None)
+            if callable(wm_fn):
+                try:
+                    wm = wm_fn(self._context)
+                    if isinstance(wm, dict) and wm.get("state") == "hard":
+                        logger.warning(
+                            "Steam card html_render skipped due to hard memory watermark (rss=%.1fMB), falling back to text",
+                            float(wm.get("rss_mb") or 0.0),
+                        )
+                        return None
+                except Exception:
+                    pass
+
         # Playwright screenshot options compatible with AstrBot's html_render
         opts: dict[str, Any] = {
             "type": "png",
@@ -319,15 +344,33 @@ class SteamCardRenderer:
         }
         _ = width  # Card width is enforced cleanly in HTML/CSS (.steam-card width)
 
-        try:
+        async def _invoke_render() -> Any:
             try:
-                result = self._html_render_fn(html, {}, options=opts)
-                if inspect.isawaitable(result):
-                    result = await result
+                res = self._html_render_fn(html, {}, options=opts)
+                if inspect.isawaitable(res):
+                    res = await res
+                return res
             except TypeError:
-                result = self._html_render_fn(html, {}, False, opts)
-                if inspect.isawaitable(result):
-                    result = await result
+                res = self._html_render_fn(html, {}, False, opts)
+                if inspect.isawaitable(res):
+                    res = await res
+                return res
+
+        slot_fn = (
+            getattr(series_panels, "heavy_subprocess_slot", None)
+            if series_panels is not None
+            else None
+        )
+        try:
+            if callable(slot_fn):
+                async with slot_fn(
+                    self._context,
+                    "steam_card_render",
+                    plugin_id="astrbot_plugin_dynamics_games",
+                ):
+                    result = await _invoke_render()
+            else:
+                result = await _invoke_render()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Steam card html_render failed, falling back to text: %s", exc)
             return None

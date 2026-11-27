@@ -18,15 +18,22 @@ from typing import Any
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 import httpx
-
 from astrbot.api import logger
+
+try:
+    from ... import series_panels
+except Exception:  # pragma: no cover - standalone fallback
+    try:
+        import series_panels  # type: ignore[no-redef]
+    except Exception:
+        series_panels = None  # type: ignore[assignment]
 
 STEAM_ID64_OFFSET = 76561197960265728
 
 MAX_GAME_NAME_CACHE_SIZE = 1024
 MAX_COVER_CACHE_SIZE = 1024
 MAX_AVATAR_FRAME_CACHE_SIZE = 1024
-MAX_ACHIEVEMENT_SCHEMA_CACHE_SIZE = 256
+MAX_ACHIEVEMENT_SCHEMA_CACHE_SIZE = 64
 MAX_NO_ACHIEVEMENT_APPS = 1024
 MAX_ACHIEVEMENT_RETRY_CACHE = 512
 
@@ -324,10 +331,13 @@ class SteamClient:
         config_getter: Callable[[], dict[str, Any]],
         data_dir: Path,
         store: Any = None,
+        *,
+        context: Any = None,
     ) -> None:
         self._config_getter = config_getter
         self.data_dir = Path(data_dir)
         self.store = store
+        self._context = context
 
         self._ssl_cache: tuple[str, ssl.SSLContext | None] = ("", None)
         self._game_name_cache: dict[str, tuple[str, str, float]] = {}
@@ -342,6 +352,54 @@ class SteamClient:
         self._store_http_client: httpx.AsyncClient | None = None
         self._http_pool_sig: tuple[int, str | None, str] | None = None
 
+    def _resource_limits(self) -> dict[str, Any]:
+        if series_panels is not None:
+            getter = getattr(series_panels, "get_series_resource_limits", None)
+            if callable(getter):
+                try:
+                    res = getter(self._context)
+                    if isinstance(res, dict):
+                        return res
+                except Exception:
+                    pass
+        return {
+            "profile": "standard",
+            "games_steam_achievement_cache": MAX_ACHIEVEMENT_SCHEMA_CACHE_SIZE,
+        }
+
+    def _cache_cap(self, kind: str) -> int:
+        limits = self._resource_limits()
+        profile = str(limits.get("profile") or "standard")
+        if kind == "achievement_schema":
+            return max(
+                8,
+                int(
+                    limits.get(
+                        "games_steam_achievement_cache",
+                        MAX_ACHIEVEMENT_SCHEMA_CACHE_SIZE,
+                    )
+                ),
+            )
+        if kind == "achievement_retry":
+            if profile == "low_memory_aggressive":
+                return 64
+            if profile == "low_memory":
+                return 128
+            return MAX_ACHIEVEMENT_RETRY_CACHE
+        if profile == "low_memory_aggressive":
+            return 128
+        if profile == "low_memory":
+            return 256
+        if kind == "game_name":
+            return MAX_GAME_NAME_CACHE_SIZE
+        if kind == "cover":
+            return MAX_COVER_CACHE_SIZE
+        if kind == "avatar_frame":
+            return MAX_AVATAR_FRAME_CACHE_SIZE
+        if kind == "no_achievement_apps":
+            return MAX_NO_ACHIEVEMENT_APPS
+        return 256
+
     @staticmethod
     def _cache_set(cache: dict[Any, Any], key: Any, value: Any, max_size: int) -> None:
         if key in cache:
@@ -355,7 +413,8 @@ class SteamClient:
         gid = str(appid or "").strip()
         if not gid or gid in self._no_achievement_apps:
             return
-        while len(self._no_achievement_apps) >= MAX_NO_ACHIEVEMENT_APPS and self._no_achievement_order:
+        cap = self._cache_cap("no_achievement_apps")
+        while len(self._no_achievement_apps) >= cap and self._no_achievement_order:
             oldest = self._no_achievement_order.popleft()
             self._no_achievement_apps.discard(oldest)
         self._no_achievement_apps.add(gid)
@@ -535,14 +594,21 @@ class SteamClient:
     ) -> dict[str, Any]:
         """Construct kwargs for httpx.AsyncClient with proxy and strict TLS verification."""
         ssl_ctx = self._get_ssl_context()
+        profile = str(self._resource_limits().get("profile") or "standard")
+        if profile == "low_memory_aggressive":
+            max_conn, max_ka, ka_exp = 6, 3, 15.0
+        elif profile == "low_memory":
+            max_conn, max_ka, ka_exp = 10, 5, 20.0
+        else:
+            max_conn, max_ka, ka_exp = 20, 10, 30.0
         kwargs: dict[str, Any] = {
             "timeout": timeout,
             "verify": ssl_ctx if ssl_ctx is not None else True,
             "follow_redirects": follow_redirects,
             "limits": httpx.Limits(
-                max_connections=20,
-                max_keepalive_connections=10,
-                keepalive_expiry=30.0,
+                max_connections=max_conn,
+                max_keepalive_connections=max_ka,
+                keepalive_expiry=ka_exp,
             ),
         }
         proxy = self.proxy_url
@@ -964,7 +1030,7 @@ class SteamClient:
                 self._game_name_cache,
                 gid,
                 (store_hit[0], store_hit[1], now),
-                MAX_GAME_NAME_CACHE_SIZE,
+                self._cache_cap("game_name"),
             )
             return store_hit
 
@@ -1004,7 +1070,7 @@ class SteamClient:
                 self._game_name_cache,
                 gid,
                 (final_zh, final_en, now),
-                MAX_GAME_NAME_CACHE_SIZE,
+                self._cache_cap("game_name"),
             )
             await asyncio.to_thread(
                 self._write_store_game_cache, gid, final_zh, final_en, header_url
@@ -1072,7 +1138,7 @@ class SteamClient:
                                     self._cover_cache,
                                     cache_key,
                                     (sgdb_url, now),
-                                    MAX_COVER_CACHE_SIZE,
+                                    self._cache_cap("cover"),
                                 )
                                 return sgdb_url
             except Exception as exc:
@@ -1082,7 +1148,7 @@ class SteamClient:
             self._cover_cache,
             cache_key,
             (default_url, now),
-            MAX_COVER_CACHE_SIZE,
+            self._cache_cap("cover"),
         )
         return default_url
 
@@ -1123,7 +1189,7 @@ class SteamClient:
                                     self._avatar_frame_cache,
                                     sid,
                                     (safe_img, now),
-                                    MAX_AVATAR_FRAME_CACHE_SIZE,
+                                    self._cache_cap("avatar_frame"),
                                 )
                                 return safe_img
                             logger.warning(
@@ -1135,7 +1201,7 @@ class SteamClient:
                                 self._avatar_frame_cache,
                                 sid,
                                 (None, now),
-                                MAX_AVATAR_FRAME_CACHE_SIZE,
+                                self._cache_cap("avatar_frame"),
                             )
                             return None
             except Exception as exc:
@@ -1163,7 +1229,7 @@ class SteamClient:
                                 self._avatar_frame_cache,
                                 sid,
                                 (result, now),
-                                MAX_AVATAR_FRAME_CACHE_SIZE,
+                                self._cache_cap("avatar_frame"),
                             )
                             return result
                         if raw_result:
@@ -1183,7 +1249,7 @@ class SteamClient:
                                     self._avatar_frame_cache,
                                     sid,
                                     (result, now),
-                                    MAX_AVATAR_FRAME_CACHE_SIZE,
+                                    self._cache_cap("avatar_frame"),
                                 )
                                 return result
                             if raw_result:
@@ -1198,7 +1264,7 @@ class SteamClient:
                     self._avatar_frame_cache,
                     sid,
                     (None, now),
-                    MAX_AVATAR_FRAME_CACHE_SIZE,
+                    self._cache_cap("avatar_frame"),
                 )
                 return None
         except Exception as exc:
@@ -1722,7 +1788,7 @@ class SteamClient:
             self._achievement_retry_after,
             retry_key,
             time.monotonic() + 300.0,
-            MAX_ACHIEVEMENT_RETRY_CACHE,
+            self._cache_cap("achievement_retry"),
         )
         logger.debug("[SteamClient] 获取玩家成就失败 (sid=%s, appid=%s): %s", sid, gid, failure)
         return None
@@ -1818,7 +1884,7 @@ class SteamClient:
                 self._achievement_schema_cache,
                 cache_key,
                 (result, now),
-                MAX_ACHIEVEMENT_SCHEMA_CACHE_SIZE,
+                self._cache_cap("achievement_schema"),
             )
         return result
 

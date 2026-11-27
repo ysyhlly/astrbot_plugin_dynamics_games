@@ -19,6 +19,14 @@ from .models import (
     parse_stages,
 )
 
+try:
+    from .. import series_panels
+except Exception:  # pragma: no cover - standalone fallback
+    try:
+        import series_panels  # type: ignore[no-redef]
+    except Exception:
+        series_panels = None  # type: ignore[assignment]
+
 
 class ActivityConflict(ValueError):
     """The activity changed after the Dashboard loaded its details."""
@@ -36,13 +44,15 @@ class ActivityStore:
 
     _locks: dict[str, threading.RLock] = {}
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, *, context: Any = None) -> None:
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._context = context
         self._lock = self._locks.setdefault(str(self.path.resolve()), threading.RLock())
         self._conn: sqlite3.Connection | None = None
         self._tx_depth = 0
         with self.connection(write=False) as db:
+            db.execute("PRAGMA auto_vacuum=INCREMENTAL")
             db.execute("PRAGMA journal_mode=WAL")
         with self.connection(write=True) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
@@ -192,8 +202,23 @@ class ActivityStore:
             )
             conn.row_factory = sqlite3.Row
             conn.isolation_level = None
+            conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA synchronous=NORMAL")
+            applied = False
+            if series_panels is not None:
+                apply_fn = getattr(series_panels, "apply_series_sqlite_pragmas", None)
+                if callable(apply_fn):
+                    try:
+                        apply_fn(conn, self._context, readonly=False)
+                        applied = True
+                    except Exception:
+                        pass
+            if not applied:
+                conn.execute("PRAGMA cache_size=-2000")
+                conn.execute("PRAGMA temp_store=FILE")
+                conn.execute("PRAGMA mmap_size=0")
+                conn.execute("PRAGMA journal_size_limit=16777216")
             self._conn = conn
         return self._conn
 
@@ -2020,3 +2045,91 @@ class ActivityStore:
                 if act is not None:
                     out.append(act)
             return out
+
+    def prune_old_activities(
+        self,
+        *,
+        max_age_days: int = 180,
+        now: float | None = None,
+        incremental_vacuum_pages: int = 128,
+    ) -> dict[str, int]:
+        """Safely prune expired/completed/cancelled activities older than max_age_days.
+
+        Leaves synced `outcomes` intact so Chronicle/Memory references and dedup tables stay valid.
+        """
+        days = max(1, int(max_age_days))
+        now_ts = float(now) if now is not None else time.time()
+        cutoff = now_ts - days * 86400.0
+        pruned_activities = 0
+        pruned_participants = 0
+        pruned_contributions = 0
+        pruned_handoffs = 0
+
+        with self.connection(write=True) as db:
+            rows = db.execute(
+                """
+                SELECT id FROM activities
+                WHERE status IN ('completed', 'cancelled', 'expired', 'closed', 'archived')
+                  AND (CASE WHEN completed_at > 0 THEN completed_at ELSE updated_at END) < ?
+                """,
+                (cutoff,),
+            ).fetchall()
+            old_ids = [str(r["id"]) for r in rows]
+            if old_ids:
+                # Batch in chunks of 200 to avoid SQLite parameter limits
+                for idx in range(0, len(old_ids), 200):
+                    chunk = old_ids[idx : idx + 200]
+                    ph = ",".join("?" for _ in chunk)
+                    pruned_contributions += max(
+                        0,
+                        int(
+                            db.execute(
+                                f"DELETE FROM contributions WHERE activity_id IN ({ph})",
+                                tuple(chunk),
+                            ).rowcount
+                            or 0
+                        ),
+                    )
+                    pruned_participants += max(
+                        0,
+                        int(
+                            db.execute(
+                                f"DELETE FROM participants WHERE activity_id IN ({ph})",
+                                tuple(chunk),
+                            ).rowcount
+                            or 0
+                        ),
+                    )
+                    pruned_activities += max(
+                        0,
+                        int(
+                            db.execute(
+                                f"DELETE FROM activities WHERE id IN ({ph})",
+                                tuple(chunk),
+                            ).rowcount
+                            or 0
+                        ),
+                    )
+            cur_h = db.execute(
+                "DELETE FROM truth_room_handoffs WHERE occurred_at < ?",
+                (cutoff,),
+            )
+            pruned_handoffs = max(0, int(cur_h.rowcount or 0))
+
+        if (
+            pruned_activities + pruned_contributions + pruned_participants + pruned_handoffs
+        ) > 0 and incremental_vacuum_pages > 0:
+            try:
+                with self.connection(write=False) as db:
+                    db.execute(
+                        f"PRAGMA incremental_vacuum({int(incremental_vacuum_pages)})"
+                    )
+            except sqlite3.Error:
+                pass
+
+        return {
+            "activities": pruned_activities,
+            "participants": pruned_participants,
+            "contributions": pruned_contributions,
+            "handoffs": pruned_handoffs,
+        }

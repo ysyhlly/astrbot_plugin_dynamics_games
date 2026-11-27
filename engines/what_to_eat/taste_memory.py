@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import re
 import shutil
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,7 @@ from astrbot.api import logger
 
 _OWNER_PLUGIN_ID = "astrbot_plugin_dynamics_games"
 _LEGACY_PLUGIN_ID = "astrbot_plugin_what_to_eat"
+DEFAULT_MAX_USERS = 2000
 
 # 自然语言口味抽取（轻量规则，不依赖 LLM）
 _LIKE_PATTERNS = (
@@ -242,11 +245,21 @@ class TasteMemoryStore:
         avoid_recent_count: int = 6,
         learn_from_message: bool = True,
         feedback_window_seconds: float = 1800.0,
+        max_users: int = DEFAULT_MAX_USERS,
+        save_debounce_seconds: float = 0.25,
     ) -> None:
         self.enabled = bool(enabled)
         self.max_recent = max(5, min(50, int(max_recent)))
         self.avoid_recent_count = max(0, min(30, int(avoid_recent_count)))
         self.auto_learn = bool(learn_from_message)
+        try:
+            self.max_users = max(1, int(max_users))
+        except (TypeError, ValueError):
+            self.max_users = DEFAULT_MAX_USERS
+        try:
+            self._save_debounce_seconds = max(0.05, float(save_debounce_seconds))
+        except (TypeError, ValueError):
+            self._save_debounce_seconds = 0.25
         try:
             self.feedback_window_seconds = max(
                 60.0, float(feedback_window_seconds)
@@ -254,14 +267,20 @@ class TasteMemoryStore:
         except (TypeError, ValueError):
             self.feedback_window_seconds = 1800.0
         self._lock = threading.RLock()
-        self._profiles: dict[str, UserTasteProfile] = {}
+        self._io_lock = threading.Lock()
+        self._defer_save: bool = True
+        self._dirty: bool = False
+        self._save_gen: int = 0
+        self._save_timer: threading.Timer | None = None
+        self._profiles: OrderedDict[str, UserTasteProfile] = OrderedDict()
         self._path = self._resolve_path(data_dir, legacy_data_dir=legacy_data_dir)
         self._load()
         logger.info(
-            "口味记忆初始化: enabled=%s path=%s users=%s avoid_recent=%s auto_learn=%s",
+            "口味记忆初始化: enabled=%s path=%s users=%s max_users=%s avoid_recent=%s auto_learn=%s",
             self.enabled,
             self._path,
             len(self._profiles),
+            self.max_users,
             self.avoid_recent_count,
             self.auto_learn,
         )
@@ -315,9 +334,17 @@ class TasteMemoryStore:
                 )
         return target
 
+    def _evict_overflow_locked(self) -> int:
+        evicted = 0
+        limit = max(1, int(getattr(self, "max_users", DEFAULT_MAX_USERS)))
+        while len(self._profiles) > limit:
+            self._profiles.popitem(last=False)
+            evicted += 1
+        return evicted
+
     def _load(self) -> None:
         if not self._path.exists():
-            self._profiles = {}
+            self._profiles = OrderedDict()
             return
         try:
             raw = self._path.read_text(encoding="utf-8")
@@ -325,48 +352,71 @@ class TasteMemoryStore:
             users = data.get("users") if isinstance(data, dict) else {}
             if not isinstance(users, dict):
                 users = {}
-            profiles: dict[str, UserTasteProfile] = {}
+            parsed: list[tuple[float, str, UserTasteProfile]] = []
             for uid, pdata in users.items():
                 if not isinstance(pdata, dict):
                     continue
                 uid_s = str(uid).strip()
                 if not uid_s:
                     continue
-                profiles[uid_s] = UserTasteProfile.from_dict(pdata, user_id=uid_s)
+                prof = UserTasteProfile.from_dict(pdata, user_id=uid_s)
+                parsed.append((float(prof.updated_at or 0.0), uid_s, prof))
+            # Oldest first so LRU eviction removes least-recently-updated users first
+            parsed.sort(key=lambda item: item[0])
+            profiles: OrderedDict[str, UserTasteProfile] = OrderedDict()
+            for _ts, uid_s, prof in parsed:
+                profiles[uid_s] = prof
             self._profiles = profiles
+            self._evict_overflow_locked()
         except Exception as e:
             logger.warning("读取口味记忆失败，将使用空档案: %s", e)
-            self._profiles = {}
+            self._profiles = OrderedDict()
 
     def _save(self) -> None:
-        self._save_timer: threading.Timer | None
+        self._save_gen = getattr(self, "_save_gen", 0) + 1
         timer = getattr(self, "_save_timer", None)
         if timer is not None:
             timer.cancel()
             self._save_timer = None
         if getattr(self, "_defer_save", True):
             self._dirty = True
-            new_timer = threading.Timer(0.25, self.flush)
+            delay = float(getattr(self, "_save_debounce_seconds", 0.25))
+            new_timer = threading.Timer(delay, self.flush)
             new_timer.daemon = True
             self._save_timer = new_timer
             new_timer.start()
             return
         self._write_snapshot()
 
-    def _write_snapshot(self) -> None:
+    def _build_snapshot_locked(self) -> tuple[int, str]:
+        self._evict_overflow_locked()
+        gen = getattr(self, "_save_gen", 0)
         payload = {
             "version": 1,
             "updated_at": _now_ts(),
             "users": {uid: p.to_dict() for uid, p in self._profiles.items()},
         }
+        return gen, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def _write_snapshot(self) -> None:
+        with self._lock:
+            gen, serialized = self._build_snapshot_locked()
+        self._write_serialized(gen, serialized)
+
+    def _write_serialized(self, gen: int, serialized: str) -> None:
+        io_lock = getattr(self, "_io_lock", None)
         tmp = self._path.with_suffix(".json.tmp")
         try:
-            tmp.write_text(
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-                encoding="utf-8",
-            )
-            tmp.replace(self._path)
-            self._dirty = False
+            if io_lock is not None:
+                with io_lock:
+                    tmp.write_text(serialized, encoding="utf-8")
+                    tmp.replace(self._path)
+            else:
+                tmp.write_text(serialized, encoding="utf-8")
+                tmp.replace(self._path)
+            with self._lock:
+                if getattr(self, "_save_gen", 0) == gen:
+                    self._dirty = False
         except Exception as e:
             logger.warning("保存口味记忆失败: %s", e)
             try:
@@ -381,8 +431,14 @@ class TasteMemoryStore:
             if timer is not None:
                 timer.cancel()
                 self._save_timer = None
-            if getattr(self, "_dirty", False):
-                self._write_snapshot()
+            if not getattr(self, "_dirty", False):
+                return
+            gen, serialized = self._build_snapshot_locked()
+        self._write_serialized(gen, serialized)
+
+    async def aflush(self) -> None:
+        """Flush pending taste memory writes off the asyncio event loop."""
+        await asyncio.to_thread(self.flush)
 
     def get_profile(self, user_id: str) -> UserTasteProfile:
         uid = str(user_id or "").strip() or "unknown"
@@ -392,6 +448,9 @@ class TasteMemoryStore:
                 profile = UserTasteProfile(user_id=uid)
                 if self.enabled:
                     self._profiles[uid] = profile
+                    self._evict_overflow_locked()
+            else:
+                self._profiles.move_to_end(uid)
             return profile
 
     def touch_nickname(self, user_id: str, nickname: str | None) -> None:

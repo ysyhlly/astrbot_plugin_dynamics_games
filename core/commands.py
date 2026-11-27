@@ -591,7 +591,7 @@ async def handle_steam_rally_command(
     coop_groups = coop.get("coop_groups") or {}
 
     lines = [
-        f"🎮 Steam 开黑摇人名单" + (f"（筛选：{game_query.strip()}）" if game_query.strip() else "")
+        "🎮 Steam 开黑摇人名单" + (f"（筛选：{game_query.strip()}）" if game_query.strip() else "")
     ]
     if coop_groups:
         lines.append("【当前多人同玩热点】")

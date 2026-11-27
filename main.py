@@ -55,6 +55,7 @@ from .core.commands import (
 )
 from .core.coordinator import ActivityCoordinator
 from .core.models import ENGINE_CATALOG
+from .core.poster import prune_old_posters
 from .core.store import ActivityStore
 from .core.web_console import GamesWebConsole
 from .engines.blackjack21.main import Blackjack21Plugin as Blackjack21Engine
@@ -314,7 +315,14 @@ class DynamicsGamesPlugin(Star):
         try:
             reload(series_panels).register_series_panels(self, PLUGIN_ID)
             db_path = StarTools.get_data_dir(PLUGIN_ID) / "dynamics_games.db"
-            self.store = await asyncio.to_thread(ActivityStore, db_path)
+            self.store = await asyncio.to_thread(
+                ActivityStore, db_path, context=self.context
+            )
+            try:
+                await asyncio.to_thread(self.store.prune_old_activities)
+                await asyncio.to_thread(prune_old_posters)
+            except Exception:
+                logger.debug("[DynamicsGames] 启动期历史数据清理跳过")
             self.coordinator = ActivityCoordinator(
                 self.store, self.context, self.raw_config, plugin=self
             )

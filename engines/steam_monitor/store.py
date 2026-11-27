@@ -7,10 +7,19 @@ import threading
 import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from .state_machine import ActiveSession
+
+try:
+    from ... import series_panels
+except Exception:  # pragma: no cover - standalone fallback
+    try:
+        import series_panels  # type: ignore[no-redef]
+    except Exception:
+        series_panels = None  # type: ignore[assignment]
 
 _GROUP_SWITCH_FIELDS = frozenset(
     {
@@ -27,15 +36,44 @@ class SteamMonitorStore:
 
     _locks: dict[str, threading.RLock] = {}
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, *, context: Any = None) -> None:
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._context = context
         self._lock = self._locks.setdefault(
             str(self.path.resolve()), threading.RLock()
         )
         self._init_schema()
 
+    def _apply_connection_pragmas(
+        self, conn: sqlite3.Connection, *, readonly: bool
+    ) -> None:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        if series_panels is not None:
+            apply_fn = getattr(series_panels, "apply_series_sqlite_pragmas", None)
+            if callable(apply_fn):
+                try:
+                    apply_fn(conn, self._context, readonly=readonly)
+                    return
+                except Exception:
+                    pass
+        conn.execute("PRAGMA cache_size=-1024" if readonly else "PRAGMA cache_size=-2000")
+        conn.execute("PRAGMA temp_store=FILE")
+        conn.execute("PRAGMA mmap_size=0")
+        if not readonly:
+            conn.execute("PRAGMA journal_size_limit=16777216")
+
     def _init_schema(self) -> None:
+        with self._lock:
+            init_conn = sqlite3.connect(str(self.path), timeout=30.0)
+            try:
+                init_conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+                init_conn.execute("PRAGMA journal_mode=WAL")
+                self._apply_connection_pragmas(init_conn, readonly=False)
+            finally:
+                init_conn.close()
         with self.connection(write=True) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version not in (0, 1):
@@ -148,9 +186,7 @@ class SteamMonitorStore:
             conn = sqlite3.connect(str(self.path), timeout=30.0)
             conn.row_factory = sqlite3.Row
             try:
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA foreign_keys=ON")
-                conn.execute("PRAGMA synchronous=NORMAL")
+                self._apply_connection_pragmas(conn, readonly=not write)
                 if write:
                     conn.execute("BEGIN IMMEDIATE")
                 yield conn
@@ -1518,3 +1554,43 @@ class SteamMonitorStore:
                 "last_rank_push_date": kv.get("last_rank_push_date", ""),
                 "legacy_migrated_v1": kv.get("legacy_migrated_v1", "") == "1",
             }
+
+    def prune_old_play_sessions(
+        self,
+        *,
+        max_age_days: int = 365,
+        now: float | None = None,
+        incremental_vacuum_pages: int = 128,
+    ) -> dict[str, int]:
+        """Prune play_sessions and legacy_daily_playtime rows older than max_age_days."""
+        days = max(1, int(max_age_days))
+        now_ts = float(now) if now is not None else time.time()
+        cutoff_ts = now_ts - days * 86400.0
+        cutoff_day = (
+            datetime.fromtimestamp(now_ts, tz=timezone.utc) - timedelta(days=days)
+        ).strftime("%Y-%m-%d")
+
+        with self.connection(write=True) as db:
+            cur_ps = db.execute(
+                "DELETE FROM play_sessions WHERE ended_at < ?",
+                (cutoff_ts,),
+            )
+            deleted_sessions = max(0, int(cur_ps.rowcount or 0))
+            cur_leg = db.execute(
+                "DELETE FROM legacy_daily_playtime WHERE day_key < ?",
+                (cutoff_day,),
+            )
+            deleted_legacy = max(0, int(cur_leg.rowcount or 0))
+
+        if (deleted_sessions + deleted_legacy) > 0 and incremental_vacuum_pages > 0:
+            try:
+                with self.connection(write=False) as db:
+                    db.execute(
+                        f"PRAGMA incremental_vacuum({int(incremental_vacuum_pages)})"
+                    )
+            except sqlite3.Error:
+                pass
+        return {
+            "play_sessions": deleted_sessions,
+            "legacy_daily_playtime": deleted_legacy,
+        }

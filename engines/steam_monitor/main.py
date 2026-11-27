@@ -277,6 +277,7 @@ class SteamMonitorEngine(Component):
 
         self._baseline_synced: bool = False
         self._last_poll_ts: float = 0.0
+        self._cached_last_rank_push_date: str | None = None
         self._initialized: bool = False
         self._closed: bool = False
 
@@ -298,6 +299,62 @@ class SteamMonitorEngine(Component):
             except Exception:
                 return True
         return True
+
+    def _resource_limits(self) -> dict[str, Any]:
+        if series_panels is not None:
+            getter = getattr(series_panels, "get_series_resource_limits", None)
+            if callable(getter):
+                try:
+                    res = getter(getattr(self, "context", None))
+                    if isinstance(res, dict):
+                        return res
+                except Exception:
+                    pass
+        return {
+            "profile": "standard",
+            "games_steam_notify_image": True,
+            "games_steam_poll_s": 60,
+        }
+
+    def _should_send_notify_image(self) -> bool:
+        if not bool(self._cfg("notify_send_image", True)):
+            return False
+        if bool(self.config.get("notify_send_image_force", False)):
+            return True
+        limits = self._resource_limits()
+        return bool(limits.get("games_steam_notify_image", True))
+
+    def _effective_poll_interval(self) -> int:
+        limits = self._resource_limits()
+        profile = str(limits.get("profile") or "standard")
+        profile_poll = max(30, int(limits.get("games_steam_poll_s", 60) or 60))
+        configured = max(30, int(self._cfg("poll_interval_seconds", profile_poll) or profile_poll))
+        if profile != "standard":
+            return max(configured, profile_poll)
+        return configured
+
+    def _can_run_background_loops(self) -> bool:
+        return bool(
+            self._start_background_tasks
+            and self._is_module_enabled()
+            and str(self._cfg("steam_api_key", "") or "").strip()
+        )
+
+    def _ensure_background_tasks_started(self) -> None:
+        if self._closed or not self._can_run_background_loops():
+            return
+        if self._send_worker_task is None or self._send_worker_task.done():
+            self._send_worker_task = asyncio.create_task(
+                self._notification_send_loop(), name="steam_monitor_send_queue"
+            )
+        if self._poll_task is None or self._poll_task.done():
+            self._poll_task = asyncio.create_task(
+                self._polling_loop(), name="steam_monitor_poll_loop"
+            )
+        if self._daily_push_task is None or self._daily_push_task.done():
+            self._daily_push_task = asyncio.create_task(
+                self._daily_rank_push_loop(), name="steam_monitor_daily_rank_loop"
+            )
 
     def _series_tz(self) -> Any:
         resolver = (
@@ -627,7 +684,9 @@ class SteamMonitorEngine(Component):
         self.data_dir = data_dir
 
         db_path = data_dir / "steam_monitor.db"
-        self.store = await asyncio.to_thread(SteamMonitorStore, db_path)
+        self.store = await asyncio.to_thread(
+            SteamMonitorStore, db_path, context=getattr(self, "context", None)
+        )
 
         try:
             self._migration_summary = await asyncio.to_thread(
@@ -641,16 +700,23 @@ class SteamMonitorEngine(Component):
         except Exception:
             self.logger.exception("[SteamMonitor] 旧版数据迁移异常（已安全跳过，不影响启动）")
 
+        try:
+            await asyncio.to_thread(self.store.prune_old_play_sessions)
+        except Exception:
+            self.logger.debug("[SteamMonitor] 过期游玩记录清理跳过（不影响启动）")
+
         last_poll_raw = await asyncio.to_thread(self.store.get_kv, "last_poll_at", "")
         try:
             self._last_poll_ts = float(last_poll_raw) if last_poll_raw else 0.0
         except ValueError:
             self._last_poll_ts = 0.0
+        self._cached_last_rank_push_date = None
 
         self.steam_client = SteamClient(
             config_getter=lambda: self.config,
             data_dir=data_dir / "steam_monitor_cache",
             store=self.store,
+            context=getattr(self, "context", None),
         )
         self.achievement_service = AchievementService(
             self.steam_client,
@@ -662,19 +728,18 @@ class SteamMonitorEngine(Component):
             config_getter=lambda: self.config,
             llm_translate_fn=self._translate_game_query,
         )
-        self.renderer = SteamCardRenderer(html_render_fn=self._resolve_html_render_fn())
+        self.renderer = SteamCardRenderer(
+            html_render_fn=self._resolve_html_render_fn(),
+            context=getattr(self, "context", None),
+        )
         await asyncio.to_thread(self.renderer.cleanup_stale_temp_files)
         self._send_queue = asyncio.Queue(maxsize=MAX_SEND_QUEUE_SIZE)
 
-        if self._start_background_tasks:
-            self._send_worker_task = asyncio.create_task(
-                self._notification_send_loop(), name="steam_monitor_send_queue"
-            )
-            self._poll_task = asyncio.create_task(
-                self._polling_loop(), name="steam_monitor_poll_loop"
-            )
-            self._daily_push_task = asyncio.create_task(
-                self._daily_rank_push_loop(), name="steam_monitor_daily_rank_loop"
+        if self._can_run_background_loops():
+            self._ensure_background_tasks_started()
+        elif self._start_background_tasks:
+            self.logger.info(
+                "[SteamMonitor] 未启用模块或未配置 steam_api_key，跳过后台轮询与每日排行任务启动"
             )
 
         self._initialized = True
@@ -1005,7 +1070,7 @@ class SteamMonitorEngine(Component):
             except Exception:
                 self.logger.exception("[SteamMonitor] 轮询周期执行异常")
 
-            interval = max(30, int(self._cfg("poll_interval_seconds", 60) or 60))
+            interval = self._effective_poll_interval()
             next_tick += interval
             delay = next_tick - time.monotonic()
             if delay <= 0:
@@ -1349,7 +1414,7 @@ class SteamMonitorEngine(Component):
                 "started_at": ev.started_at,
                 "steam_id": ev.steam_id,
             }
-            send_image = bool(self._cfg("notify_send_image", True))
+            send_image = self._should_send_notify_image()
             if send_image:
                 image_ref, fallback_text = await self.renderer.render_game_start(payload)
             else:
@@ -1392,7 +1457,7 @@ class SteamMonitorEngine(Component):
                 "ended_at": ev.ended_at or time.time(),
                 "tip": tip,
             }
-            send_image = bool(self._cfg("notify_send_image", True))
+            send_image = self._should_send_notify_image()
             if send_image:
                 image_ref, fallback_text = await self.renderer.render_game_end(payload)
             else:
@@ -1458,7 +1523,7 @@ class SteamMonitorEngine(Component):
             "avatar_frame_url": avatar_frame_url,
             "timestamp": time.time(),
         }
-        send_image = bool(self._cfg("notify_send_image", True))
+        send_image = self._should_send_notify_image()
         if send_image:
             image_ref, fallback_text = await self.renderer.render_achievement(enriched)
         else:
@@ -1512,8 +1577,11 @@ class SteamMonitorEngine(Component):
         if not force:
             if now_local < scheduled_dt:
                 return {"pushed": False, "reason": "before_schedule", "day_key": yesterday_day}
+            if self._cached_last_rank_push_date == yesterday_day:
+                return {"pushed": False, "reason": "already_pushed", "day_key": yesterday_day}
             last_pushed = await asyncio.to_thread(self.store.get_kv, "last_rank_push_date", "")
-            if last_pushed == yesterday_day:
+            self._cached_last_rank_push_date = str(last_pushed or "")
+            if self._cached_last_rank_push_date == yesterday_day:
                 return {"pushed": False, "reason": "already_pushed", "day_key": yesterday_day}
             # Respect global quiet hours / owner readiness before claiming today's push slot
             if not self._can_proactive_broadcast():
@@ -1526,6 +1594,7 @@ class SteamMonitorEngine(Component):
         # Persist push date IMMEDIATELY before sending so restarts never double-push.
         if not force:
             await asyncio.to_thread(self.store.set_kv, "last_rank_push_date", yesterday_day)
+            self._cached_last_rank_push_date = yesterday_day
 
         now_ts = now_local.timestamp()
         pushed_groups: list[str] = []
@@ -1684,7 +1753,7 @@ class SteamMonitorEngine(Component):
         ):
             return False
 
-        send_image = bool(self._cfg("notify_send_image", True))
+        send_image = self._should_send_notify_image()
         send_text = bool(self._cfg("notify_send_text", True))
         if not send_image and not send_text:
             return False
@@ -3234,6 +3303,9 @@ class SteamMonitorEngine(Component):
             except Exception as exc:
                 self.logger.warning("[SteamMonitor] 保存配置失败: %s", exc)
 
+        if k == "steam_api_key" and self._can_run_background_loops():
+            self._ensure_background_tasks_started()
+
         shown = _mask_secret(parsed) if k in SECRET_CONFIG_KEYS else parsed
         yield event.plain_result(f"✅ 已更新 {k} = {shown}（已立即生效）。")
 
@@ -3248,6 +3320,7 @@ class SteamMonitorEngine(Component):
         await self._reset_achievement_service()
         self._baseline_synced = False
         self._last_poll_ts = 0.0
+        self._cached_last_rank_push_date = None
         yield event.plain_result("✅ 已重置 Steam 监控运行状态（活跃会话与缓存已清理，下一轮将静默重新同步基线）。")
 
     async def cmd_clear_cache(self, event: Any) -> AsyncIterator[Any]:

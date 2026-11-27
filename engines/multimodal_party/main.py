@@ -26,7 +26,6 @@ from ...core.poster import (
 )
 from ...runtime import Component
 
-
 PICTIONARY_WORD_BANK: tuple[dict[str, Any], ...] = (
     {"word": "火锅", "aliases": ("涮火锅", "麻辣火锅"), "category": "美食", "hint": "热气腾腾围炉涮菜的聚餐神器", "prompt": "a steaming hotpot table with red broth, chopsticks and fresh vegetables, stylized pictionary illustration, no text"},
     {"word": "珍珠奶茶", "aliases": ("奶茶", "波霸奶茶"), "category": "美食", "hint": "透明杯子里装着黑色Q弹小圆球和吸管", "prompt": "a cute iced bubble tea cup with dark tapioca pearls and a wide straw, stylized pictionary drawing, no text"},
@@ -95,6 +94,10 @@ class TelephoneRoom:
     max_text_turns: int = 4
     initial_prompt: str = ""
     created_at: float = field(default_factory=time.time)
+    last_active_at: float = field(default_factory=time.time)
+
+    def touch(self, now: float | None = None) -> None:
+        self.last_active_at = float(now) if now is not None else time.time()
 
     def has_player(self, uid: str) -> bool:
         return any(p["uid"] == uid for p in self.players)
@@ -127,6 +130,13 @@ class PictionaryRoom:
     scores: dict[str, dict[str, Any]] = field(default_factory=dict)
     used_words: set[str] = field(default_factory=set)
     created_at: float = field(default_factory=time.time)
+    last_active_at: float = field(default_factory=time.time)
+
+    def touch(self, now: float | None = None) -> None:
+        self.last_active_at = float(now) if now is not None else time.time()
+
+
+DEFAULT_ROOM_IDLE_TTL_SECONDS = 1800.0
 
 
 def _normalize_guess(text: str) -> str:
@@ -152,6 +162,13 @@ class MultimodalPartyEngine(Component):
         self._locks: dict[str, asyncio.Lock] = {}
         self.state_change_callback: Any = None
         self.completion_callback: Any = None
+        try:
+            raw_ttl = self.config.get(
+                "room_idle_ttl_seconds", DEFAULT_ROOM_IDLE_TTL_SECONDS
+            )
+            self._room_idle_ttl_seconds: float = max(60.0, float(raw_ttl))
+        except (TypeError, ValueError):
+            self._room_idle_ttl_seconds = DEFAULT_ROOM_IDLE_TTL_SECONDS
 
     def _lock(self, key: str) -> asyncio.Lock:
         lk = self._locks.get(key)
@@ -159,6 +176,44 @@ class MultimodalPartyEngine(Component):
             lk = asyncio.Lock()
             self._locks[key] = lk
         return lk
+
+    def _release_lock_if_idle(self, key: str) -> bool:
+        lk = self._locks.get(key)
+        if lk is not None and not lk.locked():
+            self._locks.pop(key, None)
+            return True
+        return False
+
+    def cleanup_idle_rooms(self, *, now: float | None = None) -> int:
+        """Remove idle/finished telephone & pictionary rooms past TTL and reclaim unused locks."""
+        cur = float(now) if now is not None else time.time()
+        ttl = max(0.0, float(getattr(self, "_room_idle_ttl_seconds", DEFAULT_ROOM_IDLE_TTL_SECONDS)))
+        removed = 0
+
+        for rk, room in list(self.telephone_rooms.items()):
+            last_ts = max(float(getattr(room, "last_active_at", 0.0) or 0.0), float(room.created_at or 0.0))
+            if room.phase == "finished" or (cur - last_ts) >= ttl:
+                self.telephone_rooms.pop(rk, None)
+                self._release_lock_if_idle(f"tel:{rk}")
+                removed += 1
+
+        for rk, room in list(self.pictionary_rooms.items()):
+            last_ts = max(float(getattr(room, "last_active_at", 0.0) or 0.0), float(room.created_at or 0.0))
+            if room.phase == "finished" or (cur - last_ts) >= ttl:
+                self.pictionary_rooms.pop(rk, None)
+                self._release_lock_if_idle(f"pic:{rk}")
+                removed += 1
+
+        for lock_key in list(self._locks.keys()):
+            if lock_key.startswith("tel:"):
+                rk = lock_key[4:]
+                if rk not in self.telephone_rooms:
+                    self._release_lock_if_idle(lock_key)
+            elif lock_key.startswith("pic:"):
+                rk = lock_key[4:]
+                if rk not in self.pictionary_rooms:
+                    self._release_lock_if_idle(lock_key)
+        return removed
 
     @staticmethod
     def _event_identity(event: Any) -> tuple[str, str, str, str, bool]:
@@ -220,9 +275,11 @@ class MultimodalPartyEngine(Component):
                 logger.debug("多模态游戏结项归档失败: %s", exc)
 
     def active_room_count(self) -> int:
+        self.cleanup_idle_rooms()
         return len(self.telephone_rooms) + len(self.pictionary_rooms)
 
     def get_group_state(self, umo: str, group_id: str = "") -> dict[str, Any]:
+        self.cleanup_idle_rooms()
         target = str(umo or "").strip()
         gid = str(group_id or "").strip()
         tel = self.telephone_rooms.get(target) or (
@@ -362,8 +419,12 @@ class MultimodalPartyEngine(Component):
         out_text = ""
         out_image = ""
 
-        async with self._lock(f"tel:{room_key}"):
+        self.cleanup_idle_rooms()
+        lock_key = f"tel:{room_key}"
+        async with self._lock(lock_key):
             room = self.telephone_rooms.get(room_key)
+            if room is not None:
+                room.touch()
 
             if sub in ("发起", "创建", "new", "create"):
                 if room is not None and room.phase != "finished":
@@ -548,6 +609,9 @@ class MultimodalPartyEngine(Component):
             else:
                 out_text = "未知子命令。可用：`/传话筒 发起 | 加入 | 开始 | 提交 <描述> | 状态 | 结束`。"
 
+        if room_key not in self.telephone_rooms:
+            self._release_lock_if_idle(lock_key)
+
         if notify_state_args:
             await self._notify_state(**notify_state_args)
         if completion_payload and len(completion_payload.get("participants") or []) >= 1:
@@ -682,8 +746,12 @@ class MultimodalPartyEngine(Component):
         out_text = ""
         out_image = ""
 
-        async with self._lock(f"pic:{room_key}"):
+        self.cleanup_idle_rooms()
+        lock_key = f"pic:{room_key}"
+        async with self._lock(lock_key):
             room = self.pictionary_rooms.get(room_key)
+            if room is not None:
+                room.touch()
 
             if not sub:
                 if room is None:
@@ -853,6 +921,9 @@ class MultimodalPartyEngine(Component):
                 else:
                     out_text = "未知子命令。可用：`/你画我猜 开始 | 猜 <词> | 提示 | 跳过 | 结束`。"
 
+        if room_key not in self.pictionary_rooms:
+            self._release_lock_if_idle(lock_key)
+
         if notify_state_args:
             await self._notify_state(**notify_state_args)
         if completion_payload and completion_payload.get("participants"):
@@ -865,6 +936,7 @@ class MultimodalPartyEngine(Component):
 
     async def on_group_message(self, event: AstrMessageEvent):
         """Passive fast-path allowing direct chat guesses when a Pictionary round is active."""
+        self.cleanup_idle_rooms()
         room_key, gid, uid, name, _ = self._event_identity(event)
         if not gid or room_key not in self.pictionary_rooms:
             return
