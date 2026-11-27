@@ -12,8 +12,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from astrbot.api import logger
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+from astrbot.api import logger
 
 try:
     from ... import series_panels
