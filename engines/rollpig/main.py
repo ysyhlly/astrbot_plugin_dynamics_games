@@ -75,7 +75,6 @@ TRIGGER_WORDS = (
     "rollpig",
     "pig",
     "猪咪",
-    "猪",
     "🐖",
     "🐷",
     "㊗️",

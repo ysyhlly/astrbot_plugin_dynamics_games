@@ -124,8 +124,8 @@ ENGINE_CATALOG: tuple[dict[str, str], ...] = (
         "config_flag": "enable_blackjack21",
         "label": "21点",
         "category": "局内竞技",
-        "entry": "/创建21点 · /加入21点 · /开始21点",
-        "desc": "同步回合要牌/停牌博弈，支持大小王小丑模式与点数差惩罚",
+        "entry": "/创建21点 · /加入21点 · /退出21点 · /开始21点",
+        "desc": "同步回合要牌/停牌博弈，支持大小王小丑模式、点数差惩罚与非 QQ 趣味软惩罚",
     },
     {
         "key": "rollpig",

@@ -104,6 +104,7 @@ class DynamicsGamesPlugin(Star):
         self._truth_outcome_task: asyncio.Task | None = None
         self._sections: dict[str, ConfigSection] = {}
         self._legacy_conflicts: list[str] = []
+        self._scope_version: int = 0
         self._ready = False
         self._closed = False
 
@@ -121,6 +122,66 @@ class DynamicsGamesPlugin(Star):
         if isinstance(act, dict):
             return bool(act.get("enabled", True))
         return bool(self.raw_config.get("enabled", True))
+
+    def _get_config_lock(self) -> threading.RLock:
+        lock = getattr(self, "_config_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._config_lock = lock
+        return lock
+
+    def _persist_raw_config(self) -> None:
+        save_fn = getattr(self.raw_config, "save_config", None)
+        if callable(save_fn):
+            save_fn()
+
+    def _disabled_groups(self) -> set[str]:
+        raw_cfg = self.raw_config if isinstance(self.raw_config, dict) else {}
+        act = raw_cfg.get("activities")
+        raw_list = (
+            act.get("disabled_groups")
+            if isinstance(act, dict) and isinstance(act.get("disabled_groups"), list)
+            else raw_cfg.get("disabled_groups")
+        )
+        if not isinstance(raw_list, list):
+            return set()
+        return {str(item).strip() for item in raw_list if str(item or "").strip()}
+
+    @staticmethod
+    def _extract_group_id_from_umo(umo: str) -> str:
+        clean = str(umo or "").strip()
+        if not clean:
+            return ""
+        if ":GroupMessage:" in clean:
+            return clean.rsplit(":", 1)[-1].strip()
+        if ":" in clean:
+            return clean.rsplit(":", 1)[-1].strip()
+        return clean
+
+    def _is_scope_disabled(self, umo: str, group_id: str = "") -> bool:
+        disabled = self._disabled_groups()
+        if not disabled:
+            return False
+        clean_umo = str(umo or "").strip()
+        if clean_umo and clean_umo in disabled:
+            return True
+        gid = str(group_id or "").strip() or self._extract_group_id_from_umo(clean_umo)
+        return bool(gid and gid in disabled)
+
+    def _is_scope_disabled_event(self, event: AstrMessageEvent | None) -> bool:
+        if event is None:
+            return False
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        gid = ""
+        get_gid = getattr(event, "get_group_id", None)
+        if callable(get_gid):
+            try:
+                gid = str(get_gid() or "").strip()
+            except Exception:
+                gid = ""
+        if not gid:
+            gid = str(getattr(event, "group_id", "") or "").strip()
+        return self._is_scope_disabled(umo, gid)
 
     def module_enabled(self, key: str) -> bool:
         flag = MODULE_FLAG_MAP.get(key, f"enable_{key}")
@@ -334,6 +395,14 @@ class DynamicsGamesPlugin(Star):
                     if event is not None
                     else None
                 )
+            if self._is_scope_disabled_event(event):
+                return None, (
+                    event.plain_result(
+                        "群间游戏已在本群停用，可在群间控制台中重新开启。"
+                    )
+                    if event is not None
+                    else None
+                )
             if not self.module_enabled(key):
                 return None, (
                     self._disabled_reply(event, key) if event is not None else None
@@ -354,7 +423,9 @@ class DynamicsGamesPlugin(Star):
             or not self.module_enabled(key)
         ):
             return None, None
-        if self._is_event_excluded_by_core(event):
+        if self._is_event_excluded_by_core(event) or self._is_scope_disabled_event(
+            event
+        ):
             return None, None
         if self._is_in_quiet_hours():
             return None, None
@@ -581,19 +652,25 @@ class DynamicsGamesPlugin(Star):
             }
 
     def get_series_scope_status(self, umo: str) -> dict[str, Any]:
-        """Read-only per-group status for Chat Dynamics v2 group control matrix."""
+        """Per-group status for Chat Dynamics v2 group control matrix."""
         target = str(umo or "").strip()
+        scope_ver = int(getattr(self, "_scope_version", 0) or 0)
         try:
             ready = bool(self._ready and not self._closed and self.store is not None)
-            enabled = bool(self.activities_enabled()) if ready else None
+            global_enabled = bool(self.activities_enabled()) if ready else False
             if not ready or self.store is None:
+                detail = "群间游戏未就绪"
                 return {
-                    "enabled": enabled,
+                    "umo": target,
+                    "enabled": None if not ready else global_enabled,
+                    "writable": False,
+                    "mode": "denylist",
                     "supported": False,
                     "persona_id": "",
                     "activity_today": None,
-                    "summary": "群间游戏未就绪",
-                    "version": "0",
+                    "summary": detail,
+                    "detail": detail,
+                    "version": f"0:{scope_ver}:0:0",
                 }
             stats = self.store.stats_summary(target)
             open_cnt = int(stats.get("open_activities") or 0)
@@ -608,38 +685,501 @@ class DynamicsGamesPlugin(Star):
                 )
             )
             if excluded_by_core:
+                detail = "主控排除（群间游戏被动触发已静默）"
                 return {
+                    "umo": target,
                     "enabled": False,
+                    "writable": False,
+                    "mode": "excluded_by_core",
                     "supported": False,
                     "excluded_by_core": True,
                     "persona_id": "",
                     "activity_today": today_cnt,
-                    "summary": "主控排除（群间游戏被动触发已静默）",
-                    "version": f"0:{open_cnt}:{completed_cnt}",
+                    "summary": detail,
+                    "detail": detail,
+                    "version": f"0:{scope_ver}:{open_cnt}:{completed_cnt}",
                 }
-            summary = (
-                f"{open_cnt} 项进行中 · {completed_cnt} 份成果"
-                if enabled
-                else "协作活动已关闭"
-            )
+            group_disabled = bool(target and self._is_scope_disabled(target))
+            effective_enabled = bool(global_enabled and not group_disabled)
+            if effective_enabled:
+                detail = f"{open_cnt} 项进行中 · {completed_cnt} 份成果"
+            elif group_disabled:
+                detail = "本群已停用群间游戏"
+            else:
+                detail = "协作活动已关闭"
             return {
-                "enabled": enabled,
+                "umo": target,
+                "enabled": effective_enabled,
+                "writable": True,
+                "mode": "denylist",
                 "supported": True,
                 "excluded_by_core": False,
                 "persona_id": "",
                 "activity_today": today_cnt,
-                "summary": summary,
-                "version": f"{int(bool(enabled))}:{open_cnt}:{completed_cnt}",
+                "summary": detail,
+                "detail": detail,
+                "version": f"{int(effective_enabled)}:{scope_ver}:{open_cnt}:{completed_cnt}",
             }
         except Exception:
+            detail = "状态暂不可用"
             return {
+                "umo": target,
                 "enabled": None,
+                "writable": False,
+                "mode": "denylist",
                 "supported": False,
                 "persona_id": "",
                 "activity_today": None,
-                "summary": "状态暂不可用",
-                "version": "0",
+                "summary": detail,
+                "detail": detail,
+                "version": f"0:{scope_ver}:0:0",
             }
+
+    async def set_series_scope_enabled(
+        self,
+        umo: str,
+        enabled: bool,
+        expected_version: str | int | None = None,
+    ) -> dict[str, Any]:
+        """Optimistic-locked toggle for enabling/disabling Dynamics Games in a specific group UMO."""
+        target = str(umo or "").strip()
+        if not target:
+            return {
+                "ok": False,
+                "umo": "",
+                "enabled": False,
+                "version": "0",
+                "reason": "invalid_umo",
+                "summary": "缺少目标群 UMO",
+            }
+
+        def _apply() -> dict[str, Any]:
+            with self._get_config_lock():
+                current = self.get_series_scope_status(target)
+                current_version = str(current.get("version") or "0")
+                current_enabled = bool(current.get("enabled") or False)
+                if not self._ready or self._closed or self.store is None:
+                    return {
+                        "ok": False,
+                        "umo": target,
+                        "enabled": current_enabled,
+                        "version": current_version,
+                        "reason": "not_ready",
+                        "summary": "群间游戏尚未就绪",
+                    }
+                if (
+                    expected_version is not None
+                    and str(expected_version).strip() != ""
+                    and str(expected_version).strip() != current_version
+                ):
+                    return {
+                        "ok": False,
+                        "conflict": True,
+                        "umo": target,
+                        "enabled": current_enabled,
+                        "version": current_version,
+                        "reason": "version_conflict",
+                        "summary": "群间游戏群控状态已变更，请刷新后重试",
+                    }
+                want_enabled = bool(enabled)
+                if current.get("excluded_by_core") and want_enabled:
+                    return {
+                        "ok": False,
+                        "umo": target,
+                        "enabled": False,
+                        "version": current_version,
+                        "reason": "excluded_by_core",
+                        "summary": "该群已被对话主控排除，请先在对话主控取消排除后再启用",
+                    }
+
+                act = self.raw_config.get("activities")
+                if not isinstance(act, dict):
+                    act = {"enabled": bool(self.raw_config.get("enabled", True))}
+                    self.raw_config["activities"] = act
+                disabled = self._disabled_groups()
+                gid = self._extract_group_id_from_umo(target)
+                if want_enabled:
+                    disabled.discard(target)
+                    if gid:
+                        disabled.discard(gid)
+                    if not bool(act.get("enabled", True)):
+                        act["enabled"] = True
+                else:
+                    disabled.add(target)
+                act["disabled_groups"] = sorted(disabled)
+                self._scope_version = int(getattr(self, "_scope_version", 0) or 0) + 1
+                self._persist_raw_config()
+
+                updated = self.get_series_scope_status(target)
+                return {
+                    "ok": True,
+                    "umo": target,
+                    "enabled": bool(updated.get("enabled") or False),
+                    "version": str(updated.get("version") or "0"),
+                    "reason": "ok",
+                    "summary": str(updated.get("summary") or ""),
+                }
+
+        return await asyncio.to_thread(_apply)
+
+    def activate_series_runtime(self) -> dict[str, Any]:
+        """Activate Dynamics Games runtime gate for the Series Setup Wizard."""
+        if self._legacy_conflicts:
+            detail = f"检测到旧版娱乐插件冲突: {', '.join(self._legacy_conflicts)}"
+            return {
+                "ok": False,
+                "activated": False,
+                "ready": False,
+                "enabled": False,
+                "reason": "legacy_conflicts",
+                "detail": detail,
+            }
+        if self._closed:
+            return {
+                "ok": False,
+                "activated": False,
+                "ready": False,
+                "enabled": False,
+                "reason": "closed",
+                "detail": "群间游戏已关闭",
+            }
+        with self._get_config_lock():
+            act = self.raw_config.get("activities")
+            if not isinstance(act, dict):
+                act = {}
+                self.raw_config["activities"] = act
+            act["enabled"] = True
+            self._scope_version = int(getattr(self, "_scope_version", 0) or 0) + 1
+            self._persist_raw_config()
+        ready = bool(self._ready and not self._closed and self.store is not None)
+        return {
+            "ok": True,
+            "activated": True,
+            "ready": ready,
+            "enabled": True,
+            "reason": "ok",
+            "detail": "群间游戏运行态已激活" if ready else "已开启运行开关（等待初始化就绪）",
+        }
+
+    def get_active_game_state(self, umo: str) -> dict[str, Any]:
+        """Aggregate active collaborative activities and live room state across all 5 engines.
+
+        Used by Chat Dynamics to switch into companion mode and avoid interrupting live games.
+        """
+        target = str(umo or "").strip()
+        gid = self._extract_group_id_from_umo(target)
+        empty = {
+            "schema_version": 1,
+            "umo": target,
+            "active": False,
+            "engines": [],
+            "engine_rooms": {},
+            "activities": [],
+            "companion_mode_hint": "",
+        }
+        if self._closed or not self._ready or not target:
+            return empty
+        if self._is_scope_disabled(target, gid):
+            return empty
+
+        activities: list[dict[str, Any]] = []
+        if self.store is not None and self.activities_enabled():
+            try:
+                open_items = self.store.list_activities(
+                    umo=target, status="open", limit=10
+                )
+                activities = [
+                    {
+                        "id": item["id"],
+                        "category": item["category"],
+                        "category_label": item["category_label"],
+                        "title": item["title"],
+                        "status": item["status"],
+                        "current_stage": item["current_stage"],
+                        "participants": int(item.get("participant_count") or 0),
+                        "contributions": int(item.get("contribution_count") or 0),
+                        "progress_pct": int(item.get("progress_pct") or 0),
+                    }
+                    for item in open_items
+                ]
+            except Exception:
+                activities = []
+
+        active_engines: list[str] = []
+        playing_labels: list[str] = []
+        waiting_labels: list[str] = []
+        engine_rooms: dict[str, dict[str, Any]] = {}
+
+        # 1. truth_game
+        tg_eng = self.engines.get("truth_game")
+        tg_room = None
+        if tg_eng is not None and self.module_enabled("truth_game"):
+            rm = getattr(tg_eng, "room_manager", None)
+            rooms = getattr(rm, "rooms", {}) or {}
+            tg_room = rooms.get(target)
+            if tg_room is None and gid:
+                cand = rooms.get(gid)
+                if cand is not None and (not getattr(cand, "umo", "") or cand.umo == target):
+                    tg_room = cand
+        if tg_room is not None and getattr(tg_room, "phase", "") in ("waiting", "playing"):
+            phase = str(tg_room.phase)
+            active_engines.append("truth_game")
+            (playing_labels if phase == "playing" else waiting_labels).append("真心话")
+            engine_rooms["truth_game"] = {
+                "active": True,
+                "phase": phase,
+                "round_stage": str(getattr(tg_room, "round_stage", "") or ""),
+                "players": len(getattr(tg_room, "players", {}) or {}),
+                "advance_count": int(getattr(tg_room, "advance_count", 0) or 0),
+            }
+        else:
+            engine_rooms["truth_game"] = {"active": False, "phase": "idle", "players": 0}
+
+        # 2. blackjack21
+        bj_eng = self.engines.get("blackjack21")
+        bj_room = None
+        if bj_eng is not None and self.module_enabled("blackjack21"):
+            rooms = getattr(bj_eng, "rooms", {}) or {}
+            bj_room = rooms.get(target)
+            if bj_room is None and gid:
+                cand = rooms.get(gid)
+                if cand is not None and str(getattr(cand, "room_key", "")) in (target, gid):
+                    bj_room = cand
+        if bj_room is not None and getattr(bj_room, "phase", "") in ("waiting", "playing"):
+            phase = str(bj_room.phase)
+            active_engines.append("blackjack21")
+            (playing_labels if phase == "playing" else waiting_labels).append("21点")
+            engine_rooms["blackjack21"] = {
+                "active": True,
+                "phase": phase,
+                "round_no": int(getattr(bj_room, "round_no", 0) or 0),
+                "players": len(getattr(bj_room, "players", {}) or {}),
+                "joker_mode": bool(getattr(bj_room, "joker_mode", False)),
+            }
+        else:
+            engine_rooms["blackjack21"] = {"active": False, "phase": "idle", "players": 0}
+
+        # 3. rollpig (stateless daily draw)
+        engine_rooms["rollpig"] = {
+            "active": False,
+            "enabled": bool(self.engines.get("rollpig") is not None and self.module_enabled("rollpig")),
+        }
+
+        # 4. what_to_eat (stateless food recommendation)
+        engine_rooms["what_to_eat"] = {
+            "active": False,
+            "enabled": bool(
+                self.engines.get("what_to_eat") is not None
+                and self.module_enabled("what_to_eat")
+            ),
+        }
+
+        # 5. steam_monitor (background Steam playing presence in this group)
+        sm_eng = self.engines.get("steam_monitor")
+        sm_playing_games: list[str] = []
+        sm_playing_count = 0
+        sm_enabled = bool(sm_eng is not None and self.module_enabled("steam_monitor"))
+        if sm_enabled and gid:
+            sm_store = getattr(sm_eng, "store", None)
+            if sm_store is not None:
+                try:
+                    group_players = set(sm_store.list_group_players(gid) or [])
+                    if group_players:
+                        active_map = sm_store.load_active_sessions() or {}
+                        for sid, sess in active_map.items():
+                            if str(sid) in group_players and getattr(sess, "state", "") == "playing":
+                                sm_playing_count += 1
+                                gname = str(getattr(sess, "game_name", "") or "").strip()
+                                if gname and gname not in sm_playing_games:
+                                    sm_playing_games.append(gname)
+                except Exception:
+                    pass
+        engine_rooms["steam_monitor"] = {
+            "active": sm_playing_count > 0,
+            "enabled": sm_enabled,
+            "playing_count": sm_playing_count,
+            "playing_games": sm_playing_games[:6],
+        }
+
+        active = bool(active_engines or activities)
+        hint = ""
+        if playing_labels:
+            hint = (
+                f"room_playing: 本群正在进行{'、'.join(playing_labels)}对局，"
+                "请切入陪玩态（降低主动插话频率，不打断回合节奏，仅在被呼唤或自然接茬时简短回应）。"
+            )
+        elif waiting_labels:
+            hint = (
+                f"room_waiting: 本群有{'、'.join(waiting_labels)}房间正在等人开局，"
+                "可轻松附和招人，避免长篇打岔。"
+            )
+        elif activities:
+            titles = "、".join(f"《{a['title']}》" for a in activities[:3])
+            hint = (
+                f"activity_active: 本群正在开展协作活动（{titles}），"
+                "可自然呼应活动进展，勿喧宾夺主。"
+            )
+
+        return {
+            "schema_version": 1,
+            "umo": target,
+            "active": active,
+            "engines": active_engines,
+            "engine_rooms": engine_rooms,
+            "activities": activities,
+            "companion_mode_hint": hint,
+        }
+
+    async def get_active_game_state_async(self, umo: str) -> dict[str, Any]:
+        """Offload get_active_game_state SQLite reads to a worker thread."""
+        return await asyncio.to_thread(self.get_active_game_state, umo)
+
+    async def create_activity_from_companion(
+        self,
+        umo: str,
+        category: str,
+        title: str,
+        *,
+        description: str = "",
+        creator_name: str = "",
+        source_plugin: str = "",
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create a collaborative group activity on behalf of a companion plugin (e.g. Horizons)."""
+        clean_umo = str(umo or "").strip()
+        meta_dict = dict(meta) if isinstance(meta, dict) else {}
+        gid = (
+            str(meta_dict.get("group_id") or "").strip()
+            or self._extract_group_id_from_umo(clean_umo)
+        )
+        if not self._ready or self._closed or self.coordinator is None or self.store is None:
+            return {
+                "ok": False,
+                "created": False,
+                "reason": "not_ready",
+                "message": "群间游戏尚未就绪",
+                "activity_id": "",
+                "activity": None,
+            }
+        if not clean_umo or not gid:
+            return {
+                "ok": False,
+                "created": False,
+                "reason": "invalid_umo",
+                "message": "缺少有效的群会话 UMO",
+                "activity_id": "",
+                "activity": None,
+            }
+        if not self.activities_enabled() or self._is_scope_disabled(clean_umo, gid):
+            return {
+                "ok": False,
+                "created": False,
+                "reason": "disabled",
+                "message": "群间协作活动在当前群未开启",
+                "activity_id": "",
+                "activity": None,
+            }
+
+        clean_title = str(title or "").strip()
+        if not clean_title:
+            return {
+                "ok": False,
+                "created": False,
+                "reason": "invalid_title",
+                "message": "活动标题不能为空",
+                "activity_id": "",
+                "activity": None,
+            }
+
+        from .core.models import resolve_category
+
+        resolved_cat = resolve_category(str(category or ""))
+        if not resolved_cat or resolved_cat == "mini_game":
+            return {
+                "ok": False,
+                "created": False,
+                "reason": "invalid_category",
+                "message": f"未知活动类型: {category}",
+                "activity_id": "",
+                "activity": None,
+            }
+
+        if meta_dict.get("dedupe", True):
+            open_acts = await asyncio.to_thread(
+                self.store.list_activities,
+                umo=clean_umo,
+                category=resolved_cat,
+                status="open",
+                limit=20,
+            )
+            title_norm = clean_title.lower()
+            for existing in open_acts:
+                if str(existing.get("title") or "").strip().lower() == title_norm:
+                    return {
+                        "ok": True,
+                        "created": False,
+                        "reason": "already_exists",
+                        "message": f"本群已有同名进行中的活动《{existing['title']}》",
+                        "activity_id": existing["id"],
+                        "activity": existing,
+                        "source_plugin": str(source_plugin or ""),
+                        "meta": meta_dict,
+                    }
+
+        clean_source = str(source_plugin or "").strip()
+        clean_desc = str(description or "").strip()
+        if clean_source and clean_source not in clean_desc:
+            suffix = f"（由 {clean_source} 联动发起）"
+            clean_desc = f"{clean_desc} {suffix}".strip() if clean_desc else suffix
+
+        creator_uid = str(
+            meta_dict.get("creator_uid")
+            or meta_dict.get("uid")
+            or f"companion:{clean_source or 'series'}"
+        ).strip()
+        resolved_creator_name = str(
+            creator_name or meta_dict.get("creator_name") or clean_source or "群间伴生"
+        ).strip()
+
+        def _opt_int(val: Any) -> int | None:
+            if val is None or val == "":
+                return None
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return None
+
+        ok, msg, act = await self.coordinator.create_activity(
+            umo=clean_umo,
+            group_id=gid,
+            category_raw=resolved_cat,
+            title=clean_title,
+            description=clean_desc,
+            creator_uid=creator_uid,
+            creator_name=resolved_creator_name,
+            stages=meta_dict.get("stages"),
+            target_count=_opt_int(meta_dict.get("target_count")),
+            min_participants=_opt_int(meta_dict.get("min_participants")),
+        )
+        if not ok or act is None:
+            return {
+                "ok": False,
+                "created": False,
+                "reason": "create_failed",
+                "message": msg,
+                "activity_id": "",
+                "activity": None,
+            }
+        return {
+            "ok": True,
+            "created": True,
+            "reason": "ok",
+            "message": msg,
+            "activity_id": act["id"],
+            "activity": act,
+            "source_plugin": clean_source,
+            "meta": meta_dict,
+        }
 
     def series_search_items(
         self, query: str, scope: str = "", limit: int = 8
@@ -881,12 +1421,19 @@ class DynamicsGamesPlugin(Star):
         return json.dumps(data, ensure_ascii=False)
 
     # ------------------------------------------------------------------
-    # Layer 1: Unified Collaborative Activity Commands (/活动 | /群间游戏 | /共创)
+    # Layer 1: Unified Collaborative Activity Commands (/活动 | /群间游戏)
     # ------------------------------------------------------------------
-    @filter.command_group("活动", alias={"群间游戏", "共创", "games"})
+    @filter.command_group("活动", alias={"群间游戏", "games"})
     def activity_group(self):
         """群间游戏：一起完成一件事（组织共读、游戏约局、接龙创作、小型挑战、共同制作作品）"""
         pass
+
+    def _guard_activity_write(self, event: AstrMessageEvent):
+        if not self.activities_enabled() or self.coordinator is None:
+            return event.plain_result("群间协作活动功能当前未开启。")
+        if self._is_scope_disabled_event(event):
+            return event.plain_result("群间游戏已在本群停用，可在群间控制台中重新开启。")
+        return None
 
     @activity_group.command("帮助", alias={"help", "说明"})
     async def act_help(self, event: AstrMessageEvent):
@@ -901,8 +1448,9 @@ class DynamicsGamesPlugin(Star):
     @activity_group.command("发起", alias={"create", "new", "创建", "新建"})
     async def act_create(self, event: AstrMessageEvent, args: str = ""):
         """发起一项群间协作活动"""
-        if not self.activities_enabled() or self.coordinator is None:
-            yield event.plain_result("群间协作活动功能当前未开启。")
+        blocked = self._guard_activity_write(event)
+        if blocked is not None:
+            yield blocked
             return
         raw = self._extract_tail(event, ("发起", "create", "new", "创建", "新建"), args)
         yield event.plain_result(await handle_create_command(self.coordinator, event, raw))
@@ -928,8 +1476,9 @@ class DynamicsGamesPlugin(Star):
     @activity_group.command("报名", alias={"加入", "join", "signup", "上车"})
     async def act_join(self, event: AstrMessageEvent, args: str = ""):
         """报名参加群间活动"""
-        if not self.activities_enabled() or self.coordinator is None:
-            yield event.plain_result("群间协作活动功能当前未开启。")
+        blocked = self._guard_activity_write(event)
+        if blocked is not None:
+            yield blocked
             return
         raw = self._extract_tail(event, ("报名", "加入", "join", "signup", "上车"), args)
         yield event.plain_result(await handle_join_command(self.coordinator, event, raw))
@@ -970,8 +1519,9 @@ class DynamicsGamesPlugin(Star):
     @activity_group.command("打卡", alias={"checkin", "progress", "记录"})
     async def act_checkin(self, event: AstrMessageEvent, args: str = ""):
         """活动阶段打卡"""
-        if not self.activities_enabled() or self.coordinator is None:
-            yield event.plain_result("群间协作活动功能当前未开启。")
+        blocked = self._guard_activity_write(event)
+        if blocked is not None:
+            yield blocked
             return
         raw = self._extract_tail(event, ("打卡", "checkin", "progress", "记录"), args)
         yield event.plain_result(
@@ -981,8 +1531,9 @@ class DynamicsGamesPlugin(Star):
     @activity_group.command("提交", alias={"续写", "submit", "contribute", "下一棒"})
     async def act_submit(self, event: AstrMessageEvent, args: str = ""):
         """提交接龙段落、共读笔记或共创片段"""
-        if not self.activities_enabled() or self.coordinator is None:
-            yield event.plain_result("群间协作活动功能当前未开启。")
+        blocked = self._guard_activity_write(event)
+        if blocked is not None:
+            yield blocked
             return
         raw = self._extract_tail(
             event, ("提交", "续写", "submit", "contribute", "下一棒"), args
@@ -1040,45 +1591,91 @@ class DynamicsGamesPlugin(Star):
     @filter.command("共读", alias={"组织共读"})
     async def shortcut_reading(self, event: AstrMessageEvent, args: str = ""):
         """快捷发起或打卡组织共读"""
-        if not self.activities_enabled() or self.coordinator is None:
-            yield event.plain_result("群间协作活动功能当前未开启。")
+        blocked = self._guard_activity_write(event)
+        if blocked is not None:
+            yield blocked
             return
         raw = self._extract_tail(event, ("组织共读", "共读"), args)
         yield event.plain_result(
-            await handle_category_shortcut(self.coordinator, event, "reading", raw)
+            await handle_category_shortcut(
+                self.coordinator,
+                event,
+                "reading",
+                raw,
+                module_states=self.module_states(),
+            )
         )
 
     @filter.command("约局", alias={"游戏约局", "开黑"})
     async def shortcut_matchmaking(self, event: AstrMessageEvent, args: str = ""):
         """快捷发起或查看游戏约局"""
-        if not self.activities_enabled() or self.coordinator is None:
-            yield event.plain_result("群间协作活动功能当前未开启。")
+        blocked = self._guard_activity_write(event)
+        if blocked is not None:
+            yield blocked
             return
         raw = self._extract_tail(event, ("游戏约局", "约局", "开黑"), args)
         yield event.plain_result(
-            await handle_category_shortcut(self.coordinator, event, "matchmaking", raw)
+            await handle_category_shortcut(
+                self.coordinator,
+                event,
+                "matchmaking",
+                raw,
+                module_states=self.module_states(),
+            )
         )
 
     @filter.command("接龙", alias={"接龙创作", "故事接龙"})
     async def shortcut_relay(self, event: AstrMessageEvent, args: str = ""):
         """快捷发起接龙创作或续写下一棒"""
-        if not self.activities_enabled() or self.coordinator is None:
-            yield event.plain_result("群间协作活动功能当前未开启。")
+        blocked = self._guard_activity_write(event)
+        if blocked is not None:
+            yield blocked
             return
         raw = self._extract_tail(event, ("接龙创作", "故事接龙", "接龙"), args)
         yield event.plain_result(
-            await handle_category_shortcut(self.coordinator, event, "relay", raw)
+            await handle_category_shortcut(
+                self.coordinator,
+                event,
+                "relay",
+                raw,
+                module_states=self.module_states(),
+            )
         )
 
     @filter.command("挑战", alias={"小型挑战", "打卡挑战"})
     async def shortcut_challenge(self, event: AstrMessageEvent, args: str = ""):
         """快捷发起小型挑战或提交打卡"""
-        if not self.activities_enabled() or self.coordinator is None:
-            yield event.plain_result("群间协作活动功能当前未开启。")
+        blocked = self._guard_activity_write(event)
+        if blocked is not None:
+            yield blocked
             return
         raw = self._extract_tail(event, ("小型挑战", "打卡挑战", "挑战"), args)
         yield event.plain_result(
-            await handle_category_shortcut(self.coordinator, event, "challenge", raw)
+            await handle_category_shortcut(
+                self.coordinator,
+                event,
+                "challenge",
+                raw,
+                module_states=self.module_states(),
+            )
+        )
+
+    @filter.command("共创", alias={"共同制作", "共同制作作品"})
+    async def shortcut_creation(self, event: AstrMessageEvent, args: str = ""):
+        """快捷发起共同制作作品、提交共创片段或调用常用协作子指令"""
+        blocked = self._guard_activity_write(event)
+        if blocked is not None:
+            yield blocked
+            return
+        raw = self._extract_tail(event, ("共同制作作品", "共同制作", "共创"), args)
+        yield event.plain_result(
+            await handle_category_shortcut(
+                self.coordinator,
+                event,
+                "creation",
+                raw,
+                module_states=self.module_states(),
+            )
         )
 
     @staticmethod
@@ -1309,6 +1906,17 @@ class DynamicsGamesPlugin(Star):
         async for r in eng.cmd_join(event):
             yield r
 
+    @filter.command("退出21点", alias={"blackjack_leave", "离开21点"})
+    async def bj_leave(self, event: AstrMessageEvent):
+        """等待期退出21点房间"""
+        eng, reply = self._guard_engine(event, "blackjack21")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        async for r in eng.cmd_leave(event):
+            yield r
+
     @filter.command("开始21点", alias={"blackjack_go", "启动21点游戏", "开打21点"})
     async def bj_deal(self, event: AstrMessageEvent):
         """开始21点对局"""
@@ -1478,7 +2086,7 @@ class DynamicsGamesPlugin(Star):
         async for r in eng.cmd_list(event):
             yield r
 
-    @steam_group.command("who", alias={"查人"})
+    @steam_group.command("who", alias={"查人", "在干嘛"})
     async def sm_who(self, event: AstrMessageEvent, target: str = ""):
         """查询指定群友当前 Steam 状态"""
         eng, reply = self._guard_engine(event, "steam_monitor")
@@ -1486,11 +2094,11 @@ class DynamicsGamesPlugin(Star):
             if reply is not None:
                 yield reply
             return
-        raw = self._extract_tail(event, ("who", "查人"), target)
+        raw = self._extract_tail(event, ("who", "查人", "在干嘛"), target)
         async for r in eng.cmd_who(event, raw):
             yield r
 
-    @filter.command("steamwho", alias={"在干嘛"})
+    @filter.command("steamwho")
     async def sm_steamwho(self, event: AstrMessageEvent, target: str = ""):
         """即时查询指定群友（或自己）当前 Steam 游戏状态"""
         eng, reply = self._guard_engine(event, "steam_monitor")
@@ -1498,7 +2106,7 @@ class DynamicsGamesPlugin(Star):
             if reply is not None:
                 yield reply
             return
-        raw = self._extract_tail(event, ("steamwho", "在干嘛"), target)
+        raw = self._extract_tail(event, ("steamwho",), target)
         async for r in eng.cmd_who(event, raw):
             yield r
 

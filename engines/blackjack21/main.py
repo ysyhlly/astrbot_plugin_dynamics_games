@@ -40,17 +40,41 @@ RULES_TEXT = """📖 21点规则说明
 【流程】
 1. /创建21点 — 开房间（发起者=管理员）
 2. /加入21点 — 其他人加入
-3. /开始21点 — 管理员开局（至少2人）
-4. /要牌 或 /停牌 — 同步回合操作
-5. /21点状态 — 查看房间
-6. /21点帮助 — 查看本规则说明
-7. /结束21点 — 管理员结束房间
+3. /退出21点 — 等待期自助退房（房主退出自动移交，无人时自动解散）
+4. /开始21点 — 管理员开局（至少2人）
+5. /要牌 或 /停牌 — 同步回合操作
+6. /21点状态 — 查看房间
+7. /21点帮助 — 查看本规则说明
+8. /结束21点 — 管理员结束房间
 
 【结算】
-未爆牌且点数最高为本局第一（可并列）免禁言；
-其他人禁言秒数 = |与第一名点数差| × 配置值。
+未爆牌且点数最高为本局第一（可并列）获胜免罚；
+OneBot 平台：其他人禁言秒数 = |与第一名点数差| × 配置值；
+非 OneBot 平台：自动切换为仅计分 / 趣味软惩罚模式（不触发禁言）。
 
 发送 /21点帮助 可再次查看本说明。"""
+
+SOFT_PENALTIES: tuple[str, ...] = (
+    "给本局第一发一句真诚彩虹屁",
+    "在群里发一个最能代表此刻心情的表情包认输",
+    "用一句话汇报今天的摸鱼/生活进展",
+    "在群里安利一首最近单曲循环的歌或一部作品",
+    "乖乖发一句「愿赌服输，下把必赢」",
+)
+
+_QQ_AT_PLATFORMS: frozenset[str] = frozenset(
+    {
+        "aiocqhttp",
+        "onebot",
+        "napcat",
+        "gocqhttp",
+        "llonebot",
+        "lagrange",
+        "qq_official",
+        "qq_official_webhook",
+        "qq",
+    }
+)
 
 JOKER_RULES_BODY = """· 牌堆加入 🃏小王 / 🃏大王（不计点数）
 · 抽牌按权重：普通牌权重恒为 1；小丑牌权重 = 当前轮数（开局第 0 轮权重为 0，必不抽到）
@@ -69,6 +93,12 @@ class Player:
     is_host: bool = False
     cards: list[str] = field(default_factory=list)
     stood: bool = False
+    nickname: str = ""
+
+    @property
+    def display_name(self) -> str:
+        name = str(self.nickname or "").strip()
+        return name if name else str(self.user_id)
 
     @property
     def busted(self) -> bool:
@@ -331,13 +361,88 @@ class Blackjack21Plugin(Component):
         """Full rules text; always includes joker-mode section with status."""
         return RULES_TEXT + self._joker_rules_section()
 
-    def _result(self, *parts: Any) -> MessageEventResult:
-        """Build a message chain; Player segments become @mentions.
+    @staticmethod
+    def _extract_sender_name(event: Any) -> str:
+        getter = getattr(event, "get_sender_name", None)
+        if callable(getter):
+            try:
+                name = str(getter() or "").strip()
+                if name:
+                    return name
+            except Exception:
+                pass
+        return str(getattr(event, "sender_name", "") or "").strip()
+
+    @classmethod
+    def _room_platform_name(
+        cls, room: Room | None = None, event: Any = None
+    ) -> str:
+        """Best-effort lowercase platform identifier from event or room_key."""
+        if event is not None:
+            umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+            if ":" in umo:
+                return umo.split(":", 1)[0].strip().lower()
+            aid = cls._event_adapter_id(event).strip().lower()
+            if aid:
+                return aid
+        if room is not None:
+            if ":" in room.room_key:
+                return room.room_key.split(":", 1)[0].strip().lower()
+            if room.reply_event is not None:
+                return cls._room_platform_name(None, room.reply_event)
+        return ""
+
+    @classmethod
+    def _is_qq_platform(cls, platform_name: str) -> bool:
+        plat = str(platform_name or "").strip().lower()
+        if not plat:
+            return False
+        if plat in _QQ_AT_PLATFORMS:
+            return True
+        return plat.startswith(("qq", "onebot", "aiocqhttp", "napcat"))
+
+    @classmethod
+    def _supports_qq_at(
+        cls, room: Room | None = None, event: Any = None
+    ) -> bool | None:
+        """Return True for QQ/OneBot, False for non-QQ, or None when platform is unknown."""
+        plat = cls._room_platform_name(room, event)
+        if not plat:
+            return None
+        return cls._is_qq_platform(plat)
+
+    def _supports_onebot_ban(self, room: Room) -> bool:
+        """Return True only when the room has a OneBot-capable bot and numeric group ID."""
+        bot = room.bot
+        gid = str(room.group_id or "")
+        return bool(
+            bot is not None
+            and gid.isdigit()
+            and hasattr(bot, "set_group_ban")
+        )
+
+    @staticmethod
+    def _pick_soft_penalty(room: Room, player: Player, diff: int) -> str:
+        """Pick a deterministic-yet-varied lighthearted soft penalty for non-OneBot rooms."""
+        seed_text = f"{room.room_key}:{room.started_at_ns}:{room.round_no}:{player.user_id}:{diff}"
+        idx = int(hashlib.sha256(seed_text.encode("utf-8")).hexdigest(), 16) % len(
+            SOFT_PENALTIES
+        )
+        return SOFT_PENALTIES[idx]
+
+    def _result(
+        self,
+        *parts: Any,
+        room: Room | None = None,
+        use_at: bool | None = None,
+    ) -> MessageEventResult:
+        """Build a message chain; Player segments become @mentions or plain @name on non-QQ.
 
         AstrBot respond stage drops Plain segments whose text is only
         whitespace, so bare ``\\n`` would vanish. Keep newlines by appending
         a zero-width space when needed, and always put a normal space after At.
         """
+        at_allowed = self._supports_qq_at(room) if use_at is None else bool(use_at)
         flat: list[Any] = []
 
         def _flatten(part: Any) -> None:
@@ -348,7 +453,19 @@ class Blackjack21Plugin(Component):
                     _flatten(item)
                 return
             if isinstance(part, Player):
-                flat.append(part)
+                can_at = (
+                    at_allowed
+                    if at_allowed is not None
+                    else str(part.user_id).isdigit()
+                )
+                if can_at:
+                    flat.append(part)
+                else:
+                    mention_txt = f"@{part.display_name}"
+                    if flat and isinstance(flat[-1], str):
+                        flat[-1] += mention_txt
+                    else:
+                        flat.append(mention_txt)
                 return
             text = str(part)
             if flat and isinstance(flat[-1], str):
@@ -841,12 +958,16 @@ class Blackjack21Plugin(Component):
 
         parts: list[Any] = ["🏁 21点本局结束！\n"]
         parts.extend(self._room_parts(room, settle=True))
+        can_ban = self._supports_onebot_ban(room)
         parts.append("\n本局第一：")
         for i, p in enumerate(winners):
             if i:
                 parts.append("、")
             parts.extend([p, f"({hand_value(p.cards)}点)"])
-        parts.append(" —— 不用禁言\n")
+        if can_ban:
+            parts.append(" —— 不用禁言\n")
+        else:
+            parts.append(" —— 本局获胜 🏆（当前平台仅计分，免禁言）\n")
 
         for p in players:
             if p.user_id in winner_ids:
@@ -854,14 +975,23 @@ class Blackjack21Plugin(Component):
             score = hand_value(p.cards)
             diff = abs(winner_score - score)
             seconds = min(cap, max(per, diff * per))
-            ok = await self._ban(room, p.user_id, seconds)
-            parts.extend(
-                [
-                    p,
-                    f"：{score}点，与第一相差{diff}点 → 禁言{seconds}秒"
-                    + (" ✅\n" if ok else " ❌(权限不足)\n"),
-                ]
-            )
+            if can_ban and str(p.user_id).isdigit():
+                ok = await self._ban(room, p.user_id, seconds)
+                parts.extend(
+                    [
+                        p,
+                        f"：{score}点，与第一相差{diff}点 → 禁言{seconds}秒"
+                        + (" ✅\n" if ok else " ❌(权限不足)\n"),
+                    ]
+                )
+            else:
+                soft_dare = self._pick_soft_penalty(room, p, diff)
+                parts.extend(
+                    [
+                        p,
+                        f"：{score}点，与第一相差{diff}点 → 仅计分（趣味软惩罚：{soft_dare}）\n",
+                    ]
+                )
 
         room.phase = "finished"
         self._cancel_waiting_timer(room.room_key)
@@ -878,7 +1008,7 @@ class Blackjack21Plugin(Component):
                 "participants": [
                     {
                         "uid": str(p.user_id),
-                        "name": str(p.user_id),
+                        "name": p.display_name,
                         "role_weight": 3 if p.user_id in winner_ids else 1,
                     }
                     for p in players
@@ -906,7 +1036,7 @@ class Blackjack21Plugin(Component):
             parts.append("\n")
             settle_parts, outcome_payload = await self._settle_locked(room)
             parts.extend(settle_parts)
-            return self._result(*parts), outcome_payload
+            return self._result(*parts, room=room), outcome_payload
 
         self._begin_round(room)
         parts.extend(
@@ -916,7 +1046,7 @@ class Blackjack21Plugin(Component):
             ]
         )
         parts.extend(self._room_parts(room))
-        return self._result(*parts), None
+        return self._result(*parts, room=room), None
 
     async def _after_choice(
         self, room: Room, head: list[Any]
@@ -933,7 +1063,7 @@ class Blackjack21Plugin(Component):
         parts.extend(self._room_parts(room))
         parts.append("⏳ 还在等：")
         parts.extend(self._join_ats(self._waiting_players(room)))
-        return self._result(*parts), None
+        return self._result(*parts, room=room), None
 
     async def _handle_round_timeout_locked(
         self, room_key: str, round_no: int
@@ -1000,6 +1130,7 @@ class Blackjack21Plugin(Component):
                 )
             else:
                 uid = str(event.get_sender_id())
+                nick = self._extract_sender_name(event)
                 room = Room(
                     group_id=group_id,
                     host_id=uid,
@@ -1007,7 +1138,7 @@ class Blackjack21Plugin(Component):
                     room_key=room_key,
                 )
                 self._bind_event(room, event)
-                room.players[uid] = Player(user_id=uid, is_host=True)
+                room.players[uid] = Player(user_id=uid, is_host=True, nickname=nick)
                 self.rooms[room_key] = room
                 self._arm_waiting_timer(room)
                 wait_min = self._waiting_timeout() // 60
@@ -1016,11 +1147,12 @@ class Blackjack21Plugin(Component):
                     "🃏 ",
                     room.players[uid],
                     " 创建了21点房间，并成为管理员！\n"
-                    "其他人发 /加入21点\n"
+                    "其他人发 /加入21点（等待期可发 /退出21点）\n"
                     "人齐后管理员发 /开始21点\n"
                     f"规则说明：/21点帮助{joker_tip}\n"
                     f"（{wait_min} 分钟内未开始将自动关闭）\n",
                     *self._room_parts(room),
+                    room=room,
                 )
         yield reply
 
@@ -1042,14 +1174,76 @@ class Blackjack21Plugin(Component):
                 elif len(room.players) >= self._max_players():
                     reply = event.plain_result(f"满员了（最多 {self._max_players()} 人）。")
                 else:
-                    room.players[uid] = Player(user_id=uid)
+                    nick = self._extract_sender_name(event)
+                    room.players[uid] = Player(user_id=uid, nickname=nick)
                     self._bind_event(room, event)
                     reply = self._result(
                         "✅ ",
                         room.players[uid],
                         " 已加入！\n",
                         *self._room_parts(room),
+                        room=room,
                     )
+        yield reply
+
+    async def cmd_leave(self, event: AstrMessageEvent):
+        """Leave the waiting room; transfer host automatically or dissolve when empty."""
+        room_key, group_id = self._room_key(event)
+        if not group_id:
+            yield event.plain_result("21点只能在群里玩。")
+            return
+
+        cancelled: list[asyncio.Task] = []
+        async with self._room_lock(room_key):
+            room = self.rooms.get(room_key)
+            if not room:
+                reply = event.plain_result("本群没有21点房间。")
+            elif room.phase != "waiting":
+                reply = event.plain_result(
+                    "21点对局已经开始，无法中途退房；可发 /停牌 或由管理员 /结束21点。"
+                )
+            else:
+                uid = str(event.get_sender_id())
+                if uid not in room.players:
+                    reply = event.plain_result("你不在当前21点房间里。")
+                else:
+                    leaving = room.players.pop(uid)
+                    self._bind_event(room, event)
+                    if not room.players:
+                        t_wait = self._cancel_waiting_timer(room_key)
+                        if t_wait is not None:
+                            cancelled.append(t_wait)
+                        self.rooms.pop(room_key, None)
+                        reply = self._result(
+                            "👋 ",
+                            leaving,
+                            " 已退出21点房间，房间内已无成员，已自动解散。",
+                            room=room,
+                        )
+                    elif uid == room.host_id:
+                        next_host = next(iter(room.players.values()))
+                        room.host_id = next_host.user_id
+                        next_host.is_host = True
+                        reply = self._result(
+                            "👋 ",
+                            leaving,
+                            " 已退出21点房间，房主已自动移交给 ",
+                            next_host,
+                            "！\n",
+                            *self._room_parts(room),
+                            room=room,
+                        )
+                    else:
+                        reply = self._result(
+                            "👋 ",
+                            leaving,
+                            " 已退出21点房间。\n",
+                            *self._room_parts(room),
+                            room=room,
+                        )
+        if cancelled:
+            await asyncio.gather(*cancelled, return_exceptions=True)
+        self._cleanup_room_lock(room_key)
         yield reply
 
     async def cmd_deal(self, event: AstrMessageEvent):
@@ -1092,6 +1286,7 @@ class Blackjack21Plugin(Component):
                         reply = self._result(
                             "🃏 开局后无人可继续操作。\n\n",
                             *settle_parts,
+                            room=room,
                         )
                     else:
                         self._begin_round(room, bot=room.bot)
@@ -1100,16 +1295,22 @@ class Blackjack21Plugin(Component):
                             if room.joker_mode
                             else ""
                         )
+                        penalty_line = (
+                            f"与第一相差 1 点禁言 {self._mute_per_point()} 秒。\n"
+                            if self._supports_onebot_ban(room)
+                            else "当前平台采用仅计分 / 趣味软惩罚模式（不触发禁言）。\n"
+                        )
                         reply = self._result(
                             "🃏 开局！同步回合制：本轮所有未停手的人都要选一次，"
                             "全员选完后才统一要牌并进入下一轮。\n"
                             f"每轮限时 {self._round_timeout()} 秒，超时未操作视为停手。\n"
                             "已停手的人不能再要牌。\n"
-                            f"与第一相差 1 点禁言 {self._mute_per_point()} 秒。\n"
+                            f"{penalty_line}"
                             f"{joker_line}"
                             "规则：/21点帮助\n"
                             "请发 /要牌 或 /停牌\n",
                             *self._room_parts(room),
+                            room=room,
                         )
         self._cleanup_room_lock(room_key)
         if pending_outcome is not None:
@@ -1191,7 +1392,7 @@ class Blackjack21Plugin(Component):
                 reply = event.plain_result("本群没有21点房间。发 /创建21点 开一局。")
             else:
                 self._bind_event(room, event)
-                reply = self._result(*self._room_parts(room))
+                reply = self._result(*self._room_parts(room), room=room)
         self._cleanup_room_lock(room_key)
         yield reply
 
