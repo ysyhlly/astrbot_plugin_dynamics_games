@@ -103,6 +103,11 @@
         "type": "bool",
         "default": true
       },
+      "enable_multimodal_party": {
+        "description": "启用「AI 传话筒 & 你画我猜」多模态破冰小游戏",
+        "type": "bool",
+        "default": true
+      },
       "per_group_modules": {
         "description": "分群娱乐引擎开关覆盖（按 UMO 映射模块启停，由控制台维护）",
         "type": "object",

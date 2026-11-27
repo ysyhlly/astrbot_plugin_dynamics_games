@@ -31,6 +31,7 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.star import star_registry
 
 from . import series_panels
+from .bridges.ecosystem_bridge import emit_game_state_changed
 from .bridges.social_bridge import emit_entertainment_signal
 from .core.commands import (
     build_arcade_text,
@@ -57,6 +58,7 @@ from .core.models import ENGINE_CATALOG
 from .core.store import ActivityStore
 from .core.web_console import GamesWebConsole
 from .engines.blackjack21.main import Blackjack21Plugin as Blackjack21Engine
+from .engines.multimodal_party.main import MultimodalPartyEngine
 from .engines.rollpig.main import (
     COMMAND_ALIASES as ROLLPIG_ALIASES,
 )
@@ -325,6 +327,7 @@ class DynamicsGamesPlugin(Star):
                 ("rollpig", RollPigEngine),
                 ("what_to_eat", WhatToEatEngine),
                 ("steam_monitor", SteamMonitorEngine),
+                ("multimodal_party", MultimodalPartyEngine),
             )
             for key, cls in engine_builders:
                 sec = self._section(key)
@@ -335,6 +338,9 @@ class DynamicsGamesPlugin(Star):
                     inst.outcome_callback = self.coordinator.record_minigame_outcome
                 elif key == "what_to_eat":
                     inst.signal_callback = self._emit_engine_signal
+                elif key == "multimodal_party":
+                    inst.state_change_callback = self._on_engine_state_changed
+                    inst.completion_callback = self.coordinator.handle_multimodal_completion
                 init_fn = getattr(inst, "initialize", None)
                 if callable(init_fn):
                     res = init_fn()
@@ -440,6 +446,26 @@ class DynamicsGamesPlugin(Star):
 
     async def _emit_engine_signal(self, **kwargs: Any) -> dict[str, Any]:
         return await emit_entertainment_signal(self.context, **kwargs)
+
+    async def _on_engine_state_changed(
+        self,
+        *,
+        umo: str,
+        active: bool,
+        engine: str,
+        activity_id: str = "",
+        title: str = "",
+        phase: str = "",
+    ) -> dict[str, Any]:
+        return await emit_game_state_changed(
+            self.context,
+            umo=umo,
+            active=active,
+            engine=engine,
+            activity_id=activity_id,
+            title=title,
+            phase=phase,
+        )
 
     @staticmethod
     def _event_umo_and_gid(event: AstrMessageEvent | None) -> tuple[str, str]:
@@ -1100,6 +1126,28 @@ class DynamicsGamesPlugin(Star):
             "playing_count": sm_playing_count,
             "playing_games": sm_playing_games[:6],
         }
+
+        # 6. multimodal_party (AI Telephone & Pictionary)
+        mp_eng = self.engines.get("multimodal_party")
+        mp_enabled = bool(
+            mp_eng is not None
+            and self.module_enabled("multimodal_party", umo=target, group_id=gid)
+        )
+        mp_state = (
+            mp_eng.get_group_state(target, gid)
+            if mp_enabled and callable(getattr(mp_eng, "get_group_state", None))
+            else {"active": False, "phase": "idle", "subgames": []}
+        )
+        if mp_state.get("active"):
+            active_engines.append("multimodal_party")
+            mp_phase = str(mp_state.get("phase") or "playing")
+            sub_labels = [
+                "AI 传话筒" if s == "telephone" else "你画我猜"
+                for s in (mp_state.get("subgames") or [])
+            ]
+            label_str = "、".join(sub_labels) or "多模态小游戏"
+            (playing_labels if mp_phase == "playing" else waiting_labels).append(label_str)
+        engine_rooms["multimodal_party"] = {**mp_state, "enabled": mp_enabled}
 
         active = bool(active_engines or activities)
         hint = ""
@@ -1930,6 +1978,13 @@ class DynamicsGamesPlugin(Star):
             return
         async for r in eng.cmd_room_create(event):
             yield r
+        ev_umo, ev_gid = self._event_umo_and_gid(event)
+        rm = getattr(eng, "room_manager", None)
+        room = getattr(rm, "rooms", {}).get(ev_umo or ev_gid) if rm is not None else None
+        if room is not None:
+            await self._on_engine_state_changed(
+                umo=ev_umo or ev_gid, active=True, engine="truth_game", title="真心话", phase=room.phase
+            )
 
     @filter.command("报名真心话", alias=["truth_join", "加入真心话"])
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
@@ -1954,6 +2009,13 @@ class DynamicsGamesPlugin(Star):
             return
         async for r in eng.cmd_game_start(event):
             yield r
+        ev_umo, ev_gid = self._event_umo_and_gid(event)
+        rm = getattr(eng, "room_manager", None)
+        room = getattr(rm, "rooms", {}).get(ev_umo or ev_gid) if rm is not None else None
+        if room is not None and room.phase == "playing":
+            await self._on_engine_state_changed(
+                umo=ev_umo or ev_gid, active=True, engine="truth_game", title="真心话", phase="playing"
+            )
 
     @filter.command("下一题", alias=["truth_next"])
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
@@ -2002,6 +2064,12 @@ class DynamicsGamesPlugin(Star):
             return
         async for r in eng.cmd_room_end(event):
             yield r
+        ev_umo, ev_gid = self._event_umo_and_gid(event)
+        rm = getattr(eng, "room_manager", None)
+        if rm is not None and (ev_umo or ev_gid) not in (getattr(rm, "rooms", {}) or {}):
+            await self._on_engine_state_changed(
+                umo=ev_umo or ev_gid, active=False, engine="truth_game", title="真心话", phase="finished"
+            )
 
     @filter.command("真心话状态", alias=["truth_status"])
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
@@ -2058,6 +2126,11 @@ class DynamicsGamesPlugin(Star):
             return
         async for r in eng.cmd_open(event):
             yield r
+        ev_umo, ev_gid = self._event_umo_and_gid(event)
+        if (ev_umo or ev_gid) in (getattr(eng, "rooms", {}) or {}):
+            await self._on_engine_state_changed(
+                umo=ev_umo or ev_gid, active=True, engine="blackjack21", title="21点", phase="waiting"
+            )
 
     @filter.command("加入21点", alias={"blackjack_join", "加入21"})
     async def bj_join(self, event: AstrMessageEvent):
@@ -2091,6 +2164,15 @@ class DynamicsGamesPlugin(Star):
             return
         async for r in eng.cmd_deal(event):
             yield r
+        ev_umo, ev_gid = self._event_umo_and_gid(event)
+        room = (getattr(eng, "rooms", {}) or {}).get(ev_umo or ev_gid)
+        await self._on_engine_state_changed(
+            umo=ev_umo or ev_gid,
+            active=room is not None,
+            engine="blackjack21",
+            title="21点",
+            phase=room.phase if room is not None else "finished",
+        )
 
     @filter.command("要牌", alias={"blackjack_hit", "21点要牌"})
     async def bj_hit(self, event: AstrMessageEvent):
@@ -2135,6 +2217,11 @@ class DynamicsGamesPlugin(Star):
             return
         async for r in eng.cmd_end(event):
             yield r
+        ev_umo, ev_gid = self._event_umo_and_gid(event)
+        if (ev_umo or ev_gid) not in (getattr(eng, "rooms", {}) or {}):
+            await self._on_engine_state_changed(
+                umo=ev_umo or ev_gid, active=False, engine="blackjack21", title="21点", phase="finished"
+            )
 
     # ------------------------------------------------------------------
     # Engine 3: 今日小猪 (rollpig)
@@ -2590,4 +2677,41 @@ class DynamicsGamesPlugin(Star):
         eng = self._guard_passive_event(event, "steam_monitor")
         if eng is not None:
             async for r in eng.on_message(event):
+                yield r
+
+    # ------------------------------------------------------------------
+    # Engine 6: 多模态破冰小游戏 (multimodal_party: AI 传话筒 & 你画我猜)
+    # ------------------------------------------------------------------
+    @filter.command("传话筒", alias={"AI传话筒", "ai传话筒", "gartic"})
+    @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
+    async def mp_telephone(self, event: AstrMessageEvent, args: str = ""):
+        """AI 传话筒（Gartic Phone）：文→AI生图→下家看图描述多轮歪楼接龙"""
+        eng, reply = self._guard_engine(event, "multimodal_party")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("AI传话筒", "ai传话筒", "传话筒", "gartic"), args)
+        async for r in eng.cmd_telephone(event, raw):
+            yield r
+
+    @filter.command("你画我猜", alias={"画猜", "pictionary"})
+    @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
+    async def mp_pictionary(self, event: AstrMessageEvent, args: str = ""):
+        """AI 你画我猜（Pictionary）：AI 出风格化谜面图，群友猜词抢答计分"""
+        eng, reply = self._guard_engine(event, "multimodal_party")
+        if eng is None:
+            if reply is not None:
+                yield reply
+            return
+        raw = self._extract_tail(event, ("你画我猜", "画猜", "pictionary"), args)
+        async for r in eng.cmd_pictionary(event, raw):
+            yield r
+
+    @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
+    async def mp_on_group_message(self, event: AstrMessageEvent):
+        """接收你画我猜进行中的群友直接猜词抢答"""
+        eng = self._guard_passive_event(event, "multimodal_party")
+        if eng is not None:
+            async for r in eng.on_group_message(event):
                 yield r

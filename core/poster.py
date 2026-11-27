@@ -397,3 +397,232 @@ def render_relay_illustration_card(
     out_path = out_dir / f"relay_{activity.get('id', 'act')}_t{turn_number}_{digest}.png"
     canvas.save(out_path, format="PNG")
     return out_path
+
+
+def render_telephone_step_card(
+    room_title: str,
+    step_no: int,
+    prompt_text: str,
+    *,
+    output_dir: Path | None = None,
+) -> Path:
+    """Pillow fallback card for one AI Telephone image step when Visual Media is unavailable."""
+    out_dir = Path(output_dir) if output_dir is not None else _default_output_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    width, height = 720, 420
+    canvas = Image.new("RGB", (width, height), "#F7F4FB")
+    draw = ImageDraw.Draw(canvas)
+    accent = "#6C4C9E"
+    draw.rectangle([(0, 0), (width, 10)], fill=accent)
+
+    f_hdr = _load_font(26)
+    f_body = _load_font(24)
+    f_small = _load_font(18)
+
+    draw.rounded_rectangle(
+        [(36, 36), (width - 36, height - 36)],
+        radius=20,
+        fill="#FFFFFF",
+        outline="#DDD4EC",
+        width=2,
+    )
+    draw.text((60, 56), f"🎨 AI 传话筒 · 第 {step_no} 步画板（离线视觉降级）", fill=accent, font=f_hdr)
+
+    # Stylized abstract sketch hints (geometric composition seeded by prompt)
+    seed_int = int(hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()[:8], 16)
+    cx = 160 + (seed_int % 380)
+    cy = 185 + ((seed_int >> 4) % 70)
+    draw.ellipse([(cx - 48, cy - 48), (cx + 48, cy + 48)], fill="#EFE8FA", outline=accent, width=3)
+    draw.rounded_rectangle([(80, 140), (width - 80, 290)], radius=14, outline="#E3DCF0", width=2)
+
+    lines = _wrap_text(draw, f"画面意象：{prompt_text}", f_body, width - 160, max_lines=4)
+    ly = 158
+    for ln in lines:
+        draw.text((100, ly), ln, fill="#2A2433", font=f_body)
+        ly += 34
+
+    draw.text(
+        (60, height - 76),
+        f"房间《{room_title}》· 下家请根据意象脑补并发送 `/传话筒 提交 <描述>`",
+        fill="#6D637A",
+        font=f_small,
+    )
+
+    digest = hashlib.sha256(f"tel-step:{step_no}:{prompt_text}:{time.time_ns()}".encode()).hexdigest()[:10]
+    out_path = out_dir / f"telephone_step_{step_no}_{digest}.png"
+    canvas.save(out_path, format="PNG")
+    return out_path
+
+
+def render_telephone_strip(
+    title: str,
+    turns: list[dict[str, Any]],
+    *,
+    output_dir: Path | None = None,
+) -> Path:
+    """Stitch an entire AI Telephone chain (text -> image -> text -> ...) into one vertical strip."""
+    out_dir = Path(output_dir) if output_dir is not None else _default_output_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    width = 820
+    pad = 40
+    content_w = width - pad * 2
+    paper_bg = "#FAF7FC"
+    accent = "#6C4C9E"
+    line_color = "#DFD5EC"
+    ink = "#211E28"
+    muted = "#685E77"
+
+    f_title = _load_font(32)
+    f_hdr = _load_font(20)
+    f_body = _load_font(22)
+    f_small = _load_font(18)
+
+    scratch = Image.new("RGB", (width, 120), paper_bg)
+    sdraw = ImageDraw.Draw(scratch)
+
+    rendered_blocks: list[dict[str, Any]] = []
+    total_h = pad + 92
+    for idx, t in enumerate(turns[:16], 1):
+        kind = str(t.get("kind") or "text")
+        author = str(t.get("author_name") or t.get("author_uid") or "AI 画师")
+        if kind == "image":
+            img = _fit_artwork(str(t.get("image_path") or ""), content_w - 32, 300)
+            if img is not None:
+                bh = 44 + 300 + 20
+                rendered_blocks.append({"kind": "image", "idx": idx, "author": author, "img": img, "h": bh})
+                total_h += bh + 16
+                continue
+        lines = _wrap_text(
+            sdraw,
+            str(t.get("text") or "（无内容）"),
+            f_body,
+            content_w - 44,
+            max_lines=4,
+        )
+        bh = 42 + max(1, len(lines)) * 32 + 22
+        rendered_blocks.append({"kind": "text", "idx": idx, "author": author, "lines": lines, "h": bh})
+        total_h += bh + 16
+
+    total_h += 64
+    canvas = Image.new("RGB", (width, max(400, total_h)), paper_bg)
+    draw = ImageDraw.Draw(canvas)
+    draw.rectangle([(0, 0), (width, 10)], fill=accent)
+
+    y = pad
+    draw.rounded_rectangle(
+        [(pad, y), (width - pad, y + 76)],
+        radius=16,
+        fill="#F0E9FA",
+        outline=line_color,
+        width=2,
+    )
+    draw.text((pad + 22, y + 18), f"📞 AI 传话筒歪楼全纪录 · {title[:22]}", fill=accent, font=f_title)
+    y += 92
+
+    for blk in rendered_blocks:
+        bh = blk["h"]
+        draw.rounded_rectangle(
+            [(pad, y), (width - pad, y + bh)],
+            radius=14,
+            fill="#FFFFFF",
+            outline=line_color,
+            width=2,
+        )
+        tag = "🖼️ AI 绘画面" if blk["kind"] == "image" else "✍️ 群友描述"
+        draw.text(
+            (pad + 18, y + 12),
+            f"第 {blk['idx']} 棒 · {tag} · {blk['author']}",
+            fill=accent,
+            font=f_hdr,
+        )
+        if blk["kind"] == "image":
+            canvas.paste(blk["img"], (pad + 16, y + 44))
+        else:
+            ly = y + 46
+            for ln in blk["lines"]:
+                draw.text((pad + 22, ly), ln, fill=ink, font=f_body)
+                ly += 32
+        y += bh + 16
+
+    draw.text(
+        (pad, canvas.size[1] - 42),
+        f"群间游戏 · AI 传话筒对比长图（共 {len(turns)} 棒）",
+        fill=muted,
+        font=f_small,
+    )
+
+    digest = hashlib.sha256(f"tel-strip:{title}:{len(turns)}:{time.time_ns()}".encode()).hexdigest()[:10]
+    out_path = out_dir / f"telephone_strip_{digest}.png"
+    canvas.save(out_path, format="PNG")
+    return out_path
+
+
+def render_pictionary_fallback_card(
+    category: str,
+    word_len: int,
+    round_no: int,
+    *,
+    clue: str = "",
+    seed_text: str = "",
+    output_dir: Path | None = None,
+) -> Path:
+    """Pillow puzzle card fallback for Pictionary when Visual Media is unavailable (never leaks answer!)."""
+    out_dir = Path(output_dir) if output_dir is not None else _default_output_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    width, height = 720, 440
+    canvas = Image.new("RGB", (width, height), "#FBF8F1")
+    draw = ImageDraw.Draw(canvas)
+    accent = "#C46A2B"
+    draw.rectangle([(0, 0), (width, 10)], fill=accent)
+
+    f_title = _load_font(28)
+    f_big = _load_font(36)
+    f_body = _load_font(22)
+    f_small = _load_font(18)
+
+    draw.rounded_rectangle(
+        [(36, 36), (width - 36, height - 36)],
+        radius=20,
+        fill="#FFFFFF",
+        outline="#EADCC8",
+        width=2,
+    )
+    draw.text((60, 56), f"🎨 你画我猜 · 第 {round_no} 题（离线谜面卡）", fill=accent, font=f_title)
+    draw.text(
+        (60, 108),
+        f"分类：{category}  ｜  字数：{word_len} 字",
+        fill="#5E5247",
+        font=f_body,
+    )
+
+    # Abstract visual motif (seeded by category + round, never includes answer text!)
+    seed_int = int(hashlib.sha256(f"{category}:{round_no}:{seed_text}".encode()).hexdigest()[:8], 16)
+    palette = ("#F3D5B5", "#D8E2DC", "#FFE5D9", "#D7E3FC")
+    for i in range(4):
+        rx = 90 + ((seed_int >> (i * 3)) % 460)
+        ry = 155 + ((seed_int >> (i * 5)) % 90)
+        r = 22 + ((seed_int >> (i * 2)) % 28)
+        draw.ellipse([(rx - r, ry - r), (rx + r, ry + r)], fill=palette[i % len(palette)], outline=accent, width=2)
+
+    blanks = "  ".join("□" for _ in range(max(1, min(8, word_len))))
+    draw.text((60, 260), f"词长谜面：{blanks}", fill="#241E19", font=f_big)
+    if clue:
+        clue_lines = _wrap_text(draw, f"意象提示：{clue}", f_body, width - 120, max_lines=2)
+        ly = 320
+        for ln in clue_lines:
+            draw.text((60, ly), ln, fill="#5E5247", font=f_body)
+            ly += 30
+    draw.text(
+        (60, height - 72),
+        "直接发送答案或 `/你画我猜 猜 <词>` 抢答 ｜ `/你画我猜 提示` 获取线索",
+        fill="#8A7C70",
+        font=f_small,
+    )
+
+    digest = hashlib.sha256(f"pic:{category}:{round_no}:{time.time_ns()}".encode()).hexdigest()[:10]
+    out_path = out_dir / f"pictionary_r{round_no}_{digest}.png"
+    canvas.save(out_path, format="PNG")
+    return out_path

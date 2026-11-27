@@ -151,6 +151,14 @@ ENGINE_CATALOG: tuple[dict[str, str], ...] = (
         "entry": "/steam list · /steamwho · /steam rank · /steam price",
         "desc": "高频精准轮询群友 Steam 游戏状态、成就解锁、自然日时长排行与商店查价",
     },
+    {
+        "key": "multimodal_party",
+        "config_flag": "enable_multimodal_party",
+        "label": "AI 传话筒 & 你画我猜",
+        "category": "多模态破冰",
+        "entry": "/传话筒 · /你画我猜",
+        "desc": "联动视觉工坊的图文歪楼传话接龙（含对比长图）与 AI 绘图猜词抢答",
+    },
 )
 
 RISK_WORDS: tuple[str, ...] = (

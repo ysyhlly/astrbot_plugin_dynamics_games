@@ -11,6 +11,12 @@ from astrbot.api import logger
 
 from .. import series_panels
 from ..bridges.chronicle_bridge import chronicle_status, sync_outcome_to_chronicle
+from ..bridges.ecosystem_bridge import (
+    emit_game_state_changed,
+    emit_milestone_achieved,
+    notify_horizons_coread_completed,
+    register_world_keepsake,
+)
 from ..bridges.memory_bridge import memory_status, sync_experience_to_memory
 from ..bridges.social_bridge import emit_entertainment_signal
 from ..bridges.visual_bridge import generate_artwork_via_visual_media, visual_status
@@ -402,7 +408,7 @@ class ActivityCoordinator:
             return False, "请填写活动标题，例如：`/活动 发起 共读 银河铁道之夜`", None
 
         await self.cleanup_stale_activities(umo=umo)
-        return await asyncio.to_thread(
+        ok, msg, act = await asyncio.to_thread(
             self.store.create_activity_checked,
             umo=umo,
             group_id=group_id,
@@ -417,6 +423,17 @@ class ActivityCoordinator:
             max_participants=max_participants,
             max_active_per_group=self.max_active_per_group(),
         )
+        if ok and act is not None:
+            await emit_game_state_changed(
+                self.context,
+                umo=umo,
+                active=True,
+                engine="activities",
+                activity_id=act["id"],
+                title=act["title"],
+                phase=act["status"],
+            )
+        return ok, msg, act
 
     async def join(
         self,
@@ -480,6 +497,16 @@ class ActivityCoordinator:
             custom_stage_name=custom_stage_name,
             expected_revision=expected_revision,
         )
+        if ok and updated is not None:
+            await emit_game_state_changed(
+                self.context,
+                umo=umo,
+                active=True,
+                engine="activities",
+                activity_id=updated["id"],
+                title=updated["title"],
+                phase=updated["current_stage"],
+            )
         return ok, msg, updated
 
     async def submit_progress(
@@ -652,14 +679,24 @@ class ActivityCoordinator:
                     if steam_report:
                         outcome["steam_battle_report"] = steam_report
                     parts_final = await asyncio.to_thread(self.store.get_participants, aid)
+                    joined_final = [
+                        p for p in parts_final if p.get("status", "joined") == "joined"
+                    ]
+                    await emit_game_state_changed(
+                        self.context,
+                        umo=umo,
+                        active=False,
+                        engine="activities",
+                        activity_id=aid,
+                        title=target["title"],
+                        phase="completed",
+                    )
                     await emit_entertainment_signal(
                         self.context,
                         umo=umo,
                         signal_type="steam_party" if steam_report else "activity_completed",
                         summary=str(outcome.get("summary") or ""),
-                        participants=[
-                            p for p in parts_final if p.get("status", "joined") == "joined"
-                        ],
+                        participants=joined_final,
                         metadata={
                             "activity_id": aid,
                             "category": target.get("category", ""),
@@ -667,6 +704,38 @@ class ActivityCoordinator:
                         },
                         mood_hint="celebratory",
                     )
+                    if target.get("category") != "mini_game":
+                        deep_link = f"games?tab=outcomes&id={aid}"
+                        ks_title = f"【{target['category_label']}】{target['title']}"
+                        keepsake_res = await register_world_keepsake(
+                            self.context,
+                            umo=umo,
+                            title=ks_title,
+                            summary=str(outcome.get("summary") or ""),
+                            sender_name=str(target.get("creator_name") or "群友们"),
+                            image_path=poster_path,
+                            deep_link=deep_link,
+                            kind="activity_poster",
+                        )
+                        outcome["world_keepsake"] = keepsake_res
+                        await emit_milestone_achieved(
+                            self.context,
+                            umo=umo,
+                            title=ks_title,
+                            summary=str(outcome.get("summary") or ""),
+                            participants=joined_final,
+                            image_path=poster_path,
+                            deep_link=deep_link,
+                            created_at=float(target.get("completed_at") or time.time()),
+                        )
+                        horizons_res = await notify_horizons_coread_completed(
+                            self.context,
+                            umo=umo,
+                            activity=target,
+                            outcome=outcome,
+                            participants=parts_final,
+                        )
+                        outcome["horizons_callback"] = horizons_res
                 return True, sync_report, outcome
             target = await asyncio.to_thread(self.store.get_activity, aid, umo=umo)
             if target is None:
@@ -894,12 +963,82 @@ class ActivityCoordinator:
                 f"仅发起人（{target['creator_name']}）或群管理员可取消活动。",
                 target,
             )
-        return await asyncio.to_thread(
+        ok, msg, updated = await asyncio.to_thread(
             self.store.cancel_activity,
             target["id"],
             reason,
             expected_revision=expected_revision,
         )
+        if ok:
+            await emit_game_state_changed(
+                self.context,
+                umo=umo,
+                active=False,
+                engine="activities",
+                activity_id=target["id"],
+                title=target["title"],
+                phase="cancelled",
+            )
+        return ok, msg, updated
+
+    async def handle_multimodal_completion(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Archive AI Telephone / Pictionary completion to Memory, World keepsakes & Event Bus."""
+        umo = str(payload.get("umo") or "").strip()
+        gid = str(payload.get("group_id") or "").strip()
+        subgame = str(payload.get("subgame") or "multimodal_party")
+        title = str(payload.get("title") or "多模态破冰小游戏")
+        summary = str(payload.get("summary") or "")
+        participants = list(payload.get("participants") or [])
+        image_path = str(payload.get("image_path") or "").strip()
+        rounds = max(1, int(payload.get("rounds") or 1))
+
+        outcome = await self.record_minigame_outcome(
+            umo=umo,
+            group_id=gid,
+            game_key=f"multimodal_{subgame}",
+            title=title,
+            rounds=rounds,
+            participants=participants,
+            summary=summary,
+        )
+        act_id = str((outcome or {}).get("activity_id") or "")
+        if act_id and image_path:
+            await asyncio.to_thread(
+                self.store.update_outcome_poster, act_id, image_path
+            )
+        deep_link = f"games?tab=outcomes&id={act_id}" if act_id else "games?tab=engines"
+        keepsake_res: dict[str, Any] = {"ok": False, "status": "skipped"}
+        milestone_res: dict[str, Any] = {"ok": False, "status": "skipped"}
+        if subgame == "telephone" or image_path:
+            keepsake_res = await register_world_keepsake(
+                self.context,
+                umo=umo,
+                title=title,
+                summary=summary,
+                sender_name="、".join(
+                    str(p.get("name") or p.get("uid")) for p in participants[:4]
+                )
+                or "群友们",
+                image_path=image_path,
+                deep_link=deep_link,
+                kind="telephone_strip" if subgame == "telephone" else "activity_poster",
+            )
+            milestone_res = await emit_milestone_achieved(
+                self.context,
+                umo=umo,
+                title=title,
+                summary=summary,
+                participants=participants,
+                image_path=image_path,
+                deep_link=deep_link,
+            )
+        return {
+            "outcome": outcome,
+            "keepsake": keepsake_res,
+            "milestone": milestone_res,
+        }
 
     async def record_minigame_outcome(
         self,

@@ -148,6 +148,9 @@ class GamesWebConsole:
                 active_rooms = len(getattr(rm, "rooms", {}) or {})
             elif key == "blackjack21" and engine is not None:
                 active_rooms = len(getattr(engine, "rooms", {}) or {})
+            elif key == "multimodal_party" and engine is not None:
+                cnt_fn = getattr(engine, "active_room_count", None)
+                active_rooms = int(cnt_fn()) if callable(cnt_fn) else 0
             elif key == "steam_monitor" and engine is not None:
                 getter = getattr(engine, "get_runtime_summary", None)
                 if callable(getter):
